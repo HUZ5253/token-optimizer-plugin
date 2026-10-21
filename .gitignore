@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+
+# OS cruft
+.DS_Store
+
+# Editor cruft
+.vscode/
+.idea/
+*.swp
+
+# Local test/dev artifacts this repo might generate
+*.bak.*
+.token-optimizer-state/
+token-optimizer-plugin-state/

@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|Read|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/gate.py", "--state-dir", "${CLAUDE_PLUGIN_DATA}"]
+          }
+        ]
+      }
+    ]
+  }
+}
