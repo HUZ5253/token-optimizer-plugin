@@ -17,12 +17,9 @@ setups without plugin support.
 ### Option A: Plugin install (recommended)
 
 ```
-/plugin marketplace add <your-github-username>/token-optimizer-plugin
-/plugin install token-optimizer-plugin@<your-github-username>/token-optimizer-plugin
+/plugin marketplace add HUZ5253/token-optimizer-plugin
+/plugin install token-optimizer-plugin@HUZ5253/token-optimizer-plugin
 ```
-
-Replace `<your-github-username>/token-optimizer-plugin` with the actual GitHub `owner/repo`
-once this is published.
 
 **To disable or uninstall:**
 
