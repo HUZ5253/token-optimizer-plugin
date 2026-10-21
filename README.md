@@ -112,10 +112,3 @@ runs in GitHub Actions on every push and pull request (`.github/workflows/test.y
   item, not a confirmed-working claim. If `${CLAUDE_PLUGIN_DATA}` is unset or still a literal
   `${...}` placeholder at runtime, the gate falls back to a directory under the system temp dir,
   which is functional but not ideal (it won't be namespaced per-plugin-install the same way).
-
-## Before publishing
-
-Edit the placeholder `author.name` / `author.email` fields in
-[`.claude-plugin/plugin.json`](.claude-plugin/plugin.json) — they are intentionally left as
-`"Your Name"` / `"your-email@example.com"` and must be filled in with real values before this
-plugin is published to a marketplace.
