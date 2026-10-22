@@ -9,6 +9,13 @@ entry from ~/.claude/settings.json.
   token_optimizer_gate.py.
 - Writes the result back, pretty-printed (indent=2), preserving every other
   key untouched.
+- After removing the standalone entry, checks (best-effort, advisory only)
+  whether the token-optimizer-plugin Claude Code plugin's OWN PreToolUse
+  hook entry (installed independently by Claude Code's native
+  `/plugin install` system) is still present. If so, prints a note that the
+  plugin will keep gating tool calls on its own, with the one-line command
+  to remove it too. This check never blocks anything and never touches the
+  plugin's own files or registration - it only reads settings.json.
 """
 import json
 import os
@@ -17,6 +24,11 @@ import sys
 import time
 
 HOOK_MARKER = "token_optimizer_gate.py"
+
+# Best-effort marker for detecting the native Claude Code plugin install
+# (Option A) - see _merge_settings.py for the matching heuristic used at
+# install time.
+PLUGIN_MARKER = "token-optimizer-plugin"
 
 
 def references_gate(entry):
@@ -33,6 +45,39 @@ def references_gate(entry):
         if HOOK_MARKER in haystack:
             return True
     return False
+
+
+def references_plugin_install(entry):
+    """Best-effort heuristic: does this PreToolUse entry look like it points
+    at the token-optimizer-plugin Claude Code plugin's own hook script
+    (e.g. a path containing both a "plugins" cache directory and
+    "token-optimizer-plugin", ending in a hook script like gate.py)?"""
+    try:
+        entry_hooks = entry.get("hooks", [])
+    except AttributeError:
+        return False
+    for h in entry_hooks:
+        if not isinstance(h, dict):
+            continue
+        command = h.get("command", "")
+        args = h.get("args", [])
+        haystack = command + " " + " ".join(str(a) for a in args)
+        if PLUGIN_MARKER in haystack and "plugins" in haystack and "gate.py" in haystack:
+            return True
+    return False
+
+
+def warn_if_plugin_still_installed(remaining_entries):
+    if not any(references_plugin_install(e) for e in remaining_entries):
+        return
+    print("")
+    print(
+        "Note: the token-optimizer-plugin Claude Code plugin still appears to be "
+        "installed (its own PreToolUse hook entry is still present in settings.json). "
+        "It will keep gating tool calls on its own, with its own separate Read/Grep "
+        "budget."
+    )
+    print("To remove it too: /plugin uninstall token-optimizer-plugin")
 
 
 def main():
@@ -88,6 +133,15 @@ def main():
 
     print("Removed token-optimizer PreToolUse hook entry from {0}".format(settings_file))
     print("Backup of your previous settings saved at: {0}".format(backup_path))
+
+    # Advisory only - see the matching note in _merge_settings.py. A
+    # malformed remaining entry (e.g. {"hooks": null}, or a non-string
+    # "command"/"args" value) must never be able to raise here; the removal
+    # above has already succeeded and been written, so just skip the note.
+    try:
+        warn_if_plugin_still_installed(remaining)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

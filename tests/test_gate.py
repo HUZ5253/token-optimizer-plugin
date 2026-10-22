@@ -459,6 +459,86 @@ def test_11_concurrent_writes_no_torn_state_file():
                 )
 
 
+def test_12_merge_warns_when_plugin_also_installed():
+    """Regression test for the Option A + Option B double-install detection:
+    when settings.json already has a PreToolUse hook entry shaped like the
+    token-optimizer-plugin Claude Code plugin's own hook (a plugins-cache
+    path ending in gate.py), install/_merge_settings.py must print a
+    non-fatal warning to stderr while still proceeding with the install
+    (exit code 0)."""
+    tmp, claude_dir = fresh_home()
+    with tmp:
+        settings_file = os.path.join(claude_dir, "settings.json")
+        plugin_hook_path = os.path.join(
+            claude_dir,
+            "plugins",
+            "cache",
+            "some-marketplace",
+            "token-optimizer-plugin",
+            "1.0.0",
+            "hooks",
+            "gate.py",
+        )
+        settings = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash|Write|Edit|NotebookEdit|Read|Grep",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": sys.executable,
+                                "args": [plugin_hook_path],
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        with open(settings_file, "w") as f:
+            json.dump(settings, f)
+
+        merge_script = os.path.join(REPO_ROOT, "install", "_merge_settings.py")
+        proc = subprocess.run(
+            [sys.executable, merge_script, settings_file, sys.executable],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        check(
+            "12. _merge_settings.py warns on stderr + still installs (rc=0) when a "
+            "plugin-shaped hook entry is already present",
+            proc.returncode == 0
+            and "token-optimizer-plugin" in proc.stderr
+            and "also appears to be installed" in proc.stderr,
+            "rc={0} stderr={1!r}".format(proc.returncode, proc.stderr),
+        )
+
+
+def test_13_merge_silent_when_plugin_absent():
+    """Negative counterpart to test 12: with no settings.json at all (a
+    plain fresh install, nothing plugin-shaped present), _merge_settings.py
+    must NOT print the plugin-coexistence warning."""
+    tmp, claude_dir = fresh_home()
+    with tmp:
+        settings_file = os.path.join(claude_dir, "settings.json")
+        merge_script = os.path.join(REPO_ROOT, "install", "_merge_settings.py")
+        proc = subprocess.run(
+            [sys.executable, merge_script, settings_file, sys.executable],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        check(
+            "13. _merge_settings.py stays silent (no plugin-coexistence warning) "
+            "when nothing plugin-shaped is present",
+            proc.returncode == 0 and "token-optimizer-plugin" not in proc.stderr,
+            "rc={0} stderr={1!r}".format(proc.returncode, proc.stderr),
+        )
+
+
 def main():
     test_1_top_level_bash_denied()
     test_2_subagent_bash_allowed()
@@ -471,6 +551,8 @@ def main():
     test_9_plugin_denies_write_to_real_settings()
     test_10_corrupt_counter_self_heals()
     test_11_concurrent_writes_no_torn_state_file()
+    test_12_merge_warns_when_plugin_also_installed()
+    test_13_merge_silent_when_plugin_absent()
 
     print("")
     passed = sum(1 for _, status, _ in results if status == "PASS")
