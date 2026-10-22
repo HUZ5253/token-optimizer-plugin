@@ -20,11 +20,6 @@ import os
 import sys
 import time
 
-try:
-    import fcntl
-except ImportError:
-    fcntl = None
-
 STATE_DIR = os.path.expanduser("~/.claude/.token-optimizer-state")
 GLOBAL_SETTINGS = {
     os.path.realpath(os.path.expanduser("~/.claude/settings.json")),
@@ -44,6 +39,37 @@ def deny(msg):
 def session_state_path(session_id):
     digest = hashlib.sha256(str(session_id).encode("utf-8", "surrogatepass")).hexdigest()[:24]
     return os.path.join(STATE_DIR, digest + ".count")
+
+
+def read_count(state_file):
+    """Current count, 0 if absent or corrupt, None if unreadable (fail open)."""
+    try:
+        with open(state_file, "r") as fd:
+            raw = fd.read().strip()
+    except FileNotFoundError:
+        return 0
+    except Exception:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
+
+
+def write_count(state_file, count):
+    """Atomic on POSIX and Windows alike; no lock needed."""
+    tmp = "{0}.{1}.tmp".format(state_file, os.getpid())
+    try:
+        with open(tmp, "w") as fd:
+            fd.write(str(count))
+            fd.flush()
+            os.fsync(fd.fileno())
+        os.replace(tmp, state_file)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
 
 
 def main():
@@ -96,39 +122,19 @@ def main():
             return
 
         state_file = session_state_path(session_id)
-        count = 1
-        try:
-            fd = open(state_file, "a+")
-            try:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_EX)
-                fd.seek(0)
-                raw = fd.read().strip()
-                count = int(raw) if raw else 0
-                count += 1
-                fd.seek(0)
-                fd.truncate()
-                fd.write(str(count))
-                fd.flush()
-            finally:
-                if fcntl is not None:
-                    try:
-                        fcntl.flock(fd, fcntl.LOCK_UN)
-                    except Exception:
-                        pass
-                fd.close()
-        except Exception:
-            pass
-
-        if count <= 1:
+        count = read_count(state_file)
+        if count is None:
             allow()
             return
-
-        deny(
-            "token-optimizer hard rule: direct {0} #{1} this session - a string "
-            "of lookups, not a single trivial read. Delegate to Agent(scout) "
-            "instead of continuing to read directly.".format(tool_name, count)
-        )
+        if count >= 1:
+            deny(
+                "token-optimizer hard rule: you have already used your one "
+                "direct {0} this session - delegate to Agent(scout) "
+                "instead.".format(tool_name)
+            )
+            return
+        write_count(state_file, count + 1)
+        allow()
         return
 
     allow()
