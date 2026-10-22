@@ -32,6 +32,32 @@ It ships two ways to install it: as a native Claude Code **plugin** (recommended
 **standalone installer** that merges a hook entry into your own `~/.claude/settings.json` for
 setups without plugin support.
 
+## Two packagings: pick one
+
+This project ships two independent ways to get this behavior, and they're not the same thing:
+
+- **Skill** (`skills/token-optimizer/`) — **recommended for most people.** Advisory: it's a
+  SKILL.md that Claude reads and follows by instruction, same as any other skill. Install is
+  "copy a folder" — no hooks, no `settings.json` edits, no restart, nothing to uninstall but
+  deleting the folder. It can be skipped under pressure, same as any instruction can.
+
+  ```bash
+  cp -r skills/token-optimizer ~/.claude/skills/token-optimizer
+  ```
+
+  (or `<project>/.claude/skills/token-optimizer` to scope it to one project). That's the whole
+  install. See [`skills/token-optimizer/SKILL.md`](skills/token-optimizer/SKILL.md) for what it
+  actually does.
+
+- **Plugin / standalone hook** (the rest of this README) — hard enforcement. A `PreToolUse`
+  hook structurally blocks the gated tool calls rather than asking nicely; it needs a real
+  install step (merging into `settings.json`, or the `/plugin` system) and has the sharp edges
+  documented below. Reach for this only if you've read
+  [When to use this — and when not to](#when-to-use-this--and-when-not-to) and still want the
+  hard version.
+
+Everything from here down in this README is about the plugin/hook packaging.
+
 ## When to use this — and when not to
 
 **Good fit: long, research-heavy sessions.** Reading across many files, large
