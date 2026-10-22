@@ -61,7 +61,13 @@ else
 fi
 
 if [ -d "$STATE_DIR" ]; then
-  read -r -p "Also remove the state directory at $STATE_DIR? It only holds harmless per-session counters. [y/N] " REPLY
+  if [ -t 0 ]; then
+    read -r -p "Also remove the state directory at $STATE_DIR? It only holds harmless per-session counters. [y/N] " REPLY || REPLY=""
+  else
+    REPLY=""
+    echo "Not running interactively, so leaving the state directory at $STATE_DIR in place."
+    echo "Remove it yourself with: rm -rf \"$STATE_DIR\""
+  fi
   case "$REPLY" in
     [yY][eE][sS]|[yY])
       rm -rf "$STATE_DIR"

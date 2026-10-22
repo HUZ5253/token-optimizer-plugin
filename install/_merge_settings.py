@@ -21,15 +21,17 @@ hook entry into ~/.claude/settings.json.
   other key untouched.
 
 Also checks (best-effort, advisory only) whether the token-optimizer-plugin
-Claude Code plugin's OWN PreToolUse hook entry (installed independently by
-Claude Code's native `/plugin install` system, under a path like
-~/.claude/plugins/cache/<marketplace>/token-optimizer-plugin/<version>/
-hooks/gate.py) is also present in settings.json. If so, prints a non-fatal
-warning: having both installed means two independent gates run on every
-matched tool call, each enforcing its own separate Read/Grep budget, which
-can produce confusing/inconsistent-looking denial messages. This check never
-blocks installation and never touches the plugin's own files or
-registration - it only reads settings.json.
+Claude Code plugin is also installed. Claude Code does NOT merge a plugin's
+own hooks into settings.json - a plugin's hooks live in its own
+hooks/hooks.json inside the plugin cache, never in hooks.PreToolUse - so
+detection instead looks at the two real signals: settings.json's
+"enabledPlugins" map, and the presence of a plugins-cache directory for this
+plugin. If either signal is present, prints a non-fatal warning: having both
+installed means two independent gates could run on every matched tool call,
+each enforcing its own separate Read/Grep budget, which can produce
+confusing/inconsistent-looking denial messages. This check never blocks
+installation and never touches the plugin's own files or registration - it
+only reads settings.json and lists the plugins-cache directory.
 """
 import json
 import os
@@ -39,56 +41,58 @@ import time
 
 HOOK_MARKER = "token_optimizer_gate.py"
 
-# Best-effort marker for detecting the native Claude Code plugin install
-# (Option A), which registers its own PreToolUse hook pointing at a path
-# like .../plugins/cache/<marketplace>/token-optimizer-plugin/<version>/
-# hooks/gate.py. This does NOT contain "token_optimizer_gate.py" (that's
-# Option B's filename), so HOOK_MARKER alone can't detect it.
-PLUGIN_MARKER = "token-optimizer-plugin"
+# Name of the Claude Code plugin as it is registered in settings.json's
+# "enabledPlugins" map (keys look like "token-optimizer-plugin@<marketplace>")
+# and as the directory name inside the plugins cache.
+PLUGIN_NAME = "token-optimizer-plugin"
 
 
-def _entry_haystacks(pre_tool_use):
-    """Yield the combined command+args string for every hook in every
-    PreToolUse entry, tolerating malformed/unexpected shapes."""
-    for entry in pre_tool_use:
-        try:
-            entry_hooks = entry.get("hooks", [])
-        except AttributeError:
-            continue
-        for h in entry_hooks:
-            if not isinstance(h, dict):
-                continue
-            command = h.get("command", "")
-            args = h.get("args", [])
-            yield command + " " + " ".join(str(a) for a in args)
+def _plugin_in_enabled_plugins(data):
+    """True if settings.json's enabledPlugins registers this plugin. Keys
+    look like "token-optimizer-plugin@<marketplace>". A false value means
+    installed-but-disabled, which still warrants the warning: a disabled
+    plugin is one `/plugin enable` away from double-gating."""
+    enabled = data.get("enabledPlugins")
+    if not isinstance(enabled, dict):
+        return False
+    return any(str(key).split("@", 1)[0] == PLUGIN_NAME for key in enabled)
 
 
-def detect_plugin_install(pre_tool_use):
-    """Best-effort heuristic: does any PreToolUse entry look like it points
-    at the token-optimizer-plugin Claude Code plugin's own hook script
-    (e.g. a path containing both a "plugins" cache directory and
-    "token-optimizer-plugin", ending in a hook script like gate.py)? Exact
-    robustness isn't the goal here - just catching the realistic case of a
-    plugin-cache path."""
-    for haystack in _entry_haystacks(pre_tool_use):
-        if PLUGIN_MARKER in haystack and "plugins" in haystack and "gate.py" in haystack:
-            return True
-    return False
+def _plugin_in_cache(claude_dir):
+    """True if a plugins-cache directory for this plugin exists, i.e.
+    <claude_dir>/plugins/cache/<marketplace>/token-optimizer-plugin/."""
+    cache_root = os.path.join(claude_dir, "plugins", "cache")
+    try:
+        marketplaces = os.listdir(cache_root)
+    except Exception:
+        return False
+    return any(
+        os.path.isdir(os.path.join(cache_root, m, PLUGIN_NAME)) for m in marketplaces
+    )
 
 
-def warn_if_plugin_also_installed(pre_tool_use, settings_file):
-    if not detect_plugin_install(pre_tool_use):
+def detect_plugin_install(data, settings_file):
+    """Best-effort: is the token-optimizer-plugin Claude Code plugin also
+    installed? Claude Code does NOT merge a plugin's hooks into
+    settings.json, so scanning hooks.PreToolUse for a plugin-cache path can
+    never find one - that was the original bug here."""
+    if _plugin_in_enabled_plugins(data):
+        return True
+    return _plugin_in_cache(os.path.dirname(os.path.abspath(settings_file)))
+
+
+def warn_if_plugin_also_installed(data, settings_file):
+    if not detect_plugin_install(data, settings_file):
         return
     print(
         "WARNING: the token-optimizer-plugin Claude Code plugin also appears to be "
-        "installed (a PreToolUse hook entry referencing its plugins-cache "
-        ".../token-optimizer-plugin/.../hooks/gate.py path was found in {0}).".format(
-            settings_file
-        ),
+        "installed (found via enabledPlugins in {0}, or a plugins-cache directory "
+        "beside it). It may be currently disabled; a disabled plugin is one "
+        "`/plugin enable` away from being active again.".format(settings_file),
         file=sys.stderr,
     )
     print(
-        "Installing the standalone hook as well means TWO independent gates will run "
+        "Installing the standalone hook as well means TWO independent gates could run "
         "on every matched tool call, each enforcing its own separate Read/Grep budget. "
         "This can produce confusing/inconsistent-looking denial messages (e.g. a "
         "namespaced 'token-optimizer-plugin:scout' denial from one gate and a plain "
@@ -170,13 +174,12 @@ def main():
 
     # Advisory only: never blocks, never modifies anything, never touches the
     # plugin's own files/registration - just a heads-up before we proceed.
-    # This runs before the idempotency loop below has had a chance to
-    # validate entry shapes, so swallow any exception here unconditionally:
-    # a malformed PreToolUse entry (e.g. {"hooks": null}, or a non-string
-    # "command"/"args" value) must never be able to crash the install over
-    # an advisory-only check. Worst case: the warning is silently skipped.
+    # Swallow any exception here unconditionally: a malformed "enabledPlugins"
+    # shape (e.g. a non-dict value) or an unreadable plugins-cache directory
+    # must never be able to crash the install over an advisory-only check.
+    # Worst case: the warning is silently skipped.
     try:
-        warn_if_plugin_also_installed(pre_tool_use, settings_file)
+        warn_if_plugin_also_installed(data, settings_file)
     except Exception:
         pass
 

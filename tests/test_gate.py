@@ -8,11 +8,30 @@ No external dependencies beyond the stdlib. Run with:
     python3 tests/test_gate.py
 
 The suite also covers install/_merge_settings.py and
-install/_unmerge_settings.py's dual-install-path coexistence detection:
-tests 12/13 check that _merge_settings.py warns on stderr but still installs
-successfully when a plugin-shaped hook entry is already present in
-settings.json (and stays silent when nothing plugin-shaped is present), and
-test 14 checks the matching uninstall-side warning in _unmerge_settings.py.
+install/_unmerge_settings.py's dual-install-path coexistence detection,
+rebuilt around the REAL signals Claude Code actually exposes (settings.json's
+"enabledPlugins" map, and a plugins-cache directory for the plugin) rather
+than scanning hooks.PreToolUse for a plugin-cache-shaped path - Claude Code
+never merges a plugin's own hooks into settings.json, so that old scan could
+never find anything (that was Finding 15; the plugin-coexistence warning had
+never fired on any real install):
+
+- tests 12/13 check that _merge_settings.py warns on stderr (but still
+  installs, rc=0) when enabledPlugins or a plugins-cache directory signals
+  the plugin is present.
+- test 14 is the critical regression guard: with NEITHER signal present (a
+  genuinely plugin-free settings.json), no warning fires. The old code also
+  passed this case, but for the wrong reason - it never looked anywhere
+  real - which is exactly how Finding 15 shipped with passing tests.
+- tests 15/16/17 are the equivalent coverage on the uninstall side
+  (_unmerge_settings.py's matching note, printed to stdout not stderr).
+- test 18 covers Finding 16: uninstall.sh must not abort when stdin isn't a
+  terminal (e.g. piped from /dev/null) - it should skip the interactive
+  prompt, say so, and still finish with exit code 0.
+- test 19 covers Finding 17: uninstalling must restore settings.json to its
+  exact pre-install shape (no "hooks" key) when there was no "hooks" key
+  before install, rather than leaving behind an empty
+  {"hooks": {"PreToolUse": []}}.
 
 Exits 0 if all tests pass, non-zero if any fail (CI-friendly).
 """
@@ -466,42 +485,42 @@ def test_11_concurrent_writes_no_torn_state_file():
                 )
 
 
-def test_12_merge_warns_when_plugin_also_installed():
-    """Regression test for the Option A + Option B double-install detection:
-    when settings.json already has a PreToolUse hook entry shaped like the
-    token-optimizer-plugin Claude Code plugin's own hook (a plugins-cache
-    path ending in gate.py), install/_merge_settings.py must print a
-    non-fatal warning to stderr while still proceeding with the install
-    (exit code 0)."""
+STANDALONE_HOOK_PATH = os.path.join(REPO_ROOT, "install", "token_optimizer_gate.py")
+
+
+def _standalone_hook_entry():
+    return {
+        "matcher": "Bash|Write|Edit|NotebookEdit|Read|Grep",
+        "hooks": [
+            {
+                "type": "command",
+                "command": sys.executable,
+                "args": [STANDALONE_HOOK_PATH],
+            }
+        ],
+    }
+
+
+def _make_plugin_cache_dir(claude_dir, marketplace="some-marketplace"):
+    """Create an empty <claude_dir>/plugins/cache/<marketplace>/
+    token-optimizer-plugin/ directory - the real on-disk signal a native
+    `/plugin install` leaves behind, per Finding 15."""
+    path = os.path.join(claude_dir, "plugins", "cache", marketplace, "token-optimizer-plugin")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def test_12_merge_warns_when_plugin_enabled_in_settings():
+    """Finding 15 fix, signal 1: when settings.json's "enabledPlugins" map
+    registers token-optimizer-plugin (the key Claude Code actually writes,
+    e.g. "token-optimizer-plugin@some-marketplace"), install/_merge_settings.py
+    must print a non-fatal warning to stderr while still proceeding with the
+    install (exit code 0). This is a REAL signal, unlike the old (Finding 15)
+    hooks.PreToolUse scan, which Claude Code never populates for a plugin."""
     tmp, claude_dir = fresh_home()
     with tmp:
         settings_file = os.path.join(claude_dir, "settings.json")
-        plugin_hook_path = os.path.join(
-            claude_dir,
-            "plugins",
-            "cache",
-            "some-marketplace",
-            "token-optimizer-plugin",
-            "1.0.0",
-            "hooks",
-            "gate.py",
-        )
-        settings = {
-            "hooks": {
-                "PreToolUse": [
-                    {
-                        "matcher": "Bash|Write|Edit|NotebookEdit|Read|Grep",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": sys.executable,
-                                "args": [plugin_hook_path],
-                            }
-                        ],
-                    }
-                ]
-            }
-        }
+        settings = {"enabledPlugins": {"token-optimizer-plugin@some-marketplace": True}}
         with open(settings_file, "w") as f:
             json.dump(settings, f)
 
@@ -514,8 +533,8 @@ def test_12_merge_warns_when_plugin_also_installed():
         )
 
         check(
-            "12. _merge_settings.py warns on stderr + still installs (rc=0) when a "
-            "plugin-shaped hook entry is already present",
+            "12. _merge_settings.py warns on stderr + still installs (rc=0) when "
+            "enabledPlugins registers the plugin",
             proc.returncode == 0
             and "token-optimizer-plugin" in proc.stderr
             and "also appears to be installed" in proc.stderr,
@@ -523,13 +542,16 @@ def test_12_merge_warns_when_plugin_also_installed():
         )
 
 
-def test_13_merge_silent_when_plugin_absent():
-    """Negative counterpart to test 12: with no settings.json at all (a
-    plain fresh install, nothing plugin-shaped present), _merge_settings.py
-    must NOT print the plugin-coexistence warning."""
+def test_13_merge_warns_when_plugin_in_cache():
+    """Finding 15 fix, signal 2: when a plugins-cache directory for
+    token-optimizer-plugin exists on disk (settings.json otherwise has
+    neither signal - may not even exist), install/_merge_settings.py must
+    still print the warning and still install successfully."""
     tmp, claude_dir = fresh_home()
     with tmp:
-        settings_file = os.path.join(claude_dir, "settings.json")
+        _make_plugin_cache_dir(claude_dir)
+        settings_file = os.path.join(claude_dir, "settings.json")  # does not exist yet
+
         merge_script = os.path.join(REPO_ROOT, "install", "_merge_settings.py")
         proc = subprocess.run(
             [sys.executable, merge_script, settings_file, sys.executable],
@@ -539,73 +561,66 @@ def test_13_merge_silent_when_plugin_absent():
         )
 
         check(
-            "13. _merge_settings.py stays silent (no plugin-coexistence warning) "
-            "when nothing plugin-shaped is present",
+            "13. _merge_settings.py warns on stderr + still installs (rc=0) when "
+            "a plugins-cache directory for the plugin exists",
+            proc.returncode == 0
+            and "token-optimizer-plugin" in proc.stderr
+            and "also appears to be installed" in proc.stderr,
+            "rc={0} stderr={1!r}".format(proc.returncode, proc.stderr),
+        )
+
+
+def test_14_merge_silent_when_plugin_absent():
+    """THE critical regression guard for Finding 15: with NEITHER signal
+    present - no settings.json at all, so certainly no "enabledPlugins"
+    entry, and no plugins-cache directory for this plugin - this is the
+    real-world "plugin genuinely not installed" case, and
+    _merge_settings.py must NOT print the plugin-coexistence warning. The
+    OLD code also passed this exact case, but for the wrong reason (it
+    scanned hooks.PreToolUse, which a plugin install never populates), which
+    is exactly how Finding 15 shipped silently broken behind 4 passing
+    tests. This test only means something because tests 12/13 above prove
+    the warning CAN fire on the real signals."""
+    tmp, claude_dir = fresh_home()
+    with tmp:
+        settings_file = os.path.join(claude_dir, "settings.json")  # does not exist
+        merge_script = os.path.join(REPO_ROOT, "install", "_merge_settings.py")
+        proc = subprocess.run(
+            [sys.executable, merge_script, settings_file, sys.executable],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        check(
+            "14. _merge_settings.py stays silent (no plugin-coexistence warning) "
+            "when genuinely neither real signal is present",
             proc.returncode == 0 and "token-optimizer-plugin" not in proc.stderr,
             "rc={0} stderr={1!r}".format(proc.returncode, proc.stderr),
         )
 
 
-def test_14_unmerge_warns_when_plugin_still_installed():
-    """Uninstall-side counterpart to tests 12/13: install/_unmerge_settings.py
-    has its own warn_if_plugin_still_installed/references_plugin_install
-    helpers, exercised here for the first time. Positive case: settings.json
-    has both the standalone gate's hook entry (the thing being removed) and a
-    plugin-shaped hook entry (same pattern test 12 uses to simulate the
-    plugin also being installed); after removing the standalone entry,
-    _unmerge_settings.py must still succeed (rc=0) and must note that the
-    plugin still appears to be installed (that note is printed with a plain
-    print(), i.e. to stdout, unlike _merge_settings.py's stderr warning -
-    checked against the real output below rather than assumed). Negative
-    case: with no plugin-shaped entry present, no such note is printed."""
-    unmerge_script = os.path.join(REPO_ROOT, "install", "_unmerge_settings.py")
-
-    # Positive case: standalone entry + plugin-shaped entry both present.
+def test_15_unmerge_notes_when_plugin_enabled_in_settings():
+    """Uninstall-side counterpart to test 12: settings.json has both the
+    standalone gate's hook entry (the thing being removed) and an
+    "enabledPlugins" entry registering token-optimizer-plugin. After
+    removing the standalone entry, _unmerge_settings.py must still succeed
+    (rc=0) and must note that the plugin still appears to be installed -
+    that note is printed with a plain print(), i.e. to stdout, unlike
+    _merge_settings.py's stderr warning (checked against the real output
+    below rather than assumed, per the prior round's lesson that the two
+    sides are not symmetric)."""
     tmp, claude_dir = fresh_home()
     with tmp:
         settings_file = os.path.join(claude_dir, "settings.json")
-        plugin_hook_path = os.path.join(
-            claude_dir,
-            "plugins",
-            "cache",
-            "some-marketplace",
-            "token-optimizer-plugin",
-            "1.0.0",
-            "hooks",
-            "gate.py",
-        )
-        standalone_hook_path = os.path.join(
-            REPO_ROOT, "install", "token_optimizer_gate.py"
-        )
         settings = {
-            "hooks": {
-                "PreToolUse": [
-                    {
-                        "matcher": "Bash|Write|Edit|NotebookEdit|Read|Grep",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": sys.executable,
-                                "args": [standalone_hook_path],
-                            }
-                        ],
-                    },
-                    {
-                        "matcher": "Bash|Write|Edit|NotebookEdit|Read|Grep",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": sys.executable,
-                                "args": [plugin_hook_path],
-                            }
-                        ],
-                    },
-                ]
-            }
+            "hooks": {"PreToolUse": [_standalone_hook_entry()]},
+            "enabledPlugins": {"token-optimizer-plugin@some-marketplace": True},
         }
         with open(settings_file, "w") as f:
             json.dump(settings, f)
 
+        unmerge_script = os.path.join(REPO_ROOT, "install", "_unmerge_settings.py")
         proc = subprocess.run(
             [sys.executable, unmerge_script, settings_file],
             capture_output=True,
@@ -623,8 +638,9 @@ def test_14_unmerge_warns_when_plugin_still_installed():
         )
 
         check(
-            "14. _unmerge_settings.py removes the standalone entry (rc=0) and "
-            "notes on stdout that the plugin still appears to be installed",
+            "15. _unmerge_settings.py removes the standalone entry (rc=0) and "
+            "notes on stdout that the plugin still appears to be installed "
+            "(enabledPlugins signal)",
             proc.returncode == 0
             and standalone_removed
             and "token-optimizer-plugin" in proc.stdout
@@ -634,45 +650,164 @@ def test_14_unmerge_warns_when_plugin_still_installed():
             ),
         )
 
-    # Negative case: only the standalone entry is present, no plugin-shaped
-    # entry - mirrors test 13's structure for the merge side.
-    tmp2, claude_dir2 = fresh_home()
-    with tmp2:
-        settings_file2 = os.path.join(claude_dir2, "settings.json")
-        standalone_hook_path2 = os.path.join(
-            REPO_ROOT, "install", "token_optimizer_gate.py"
-        )
-        settings2 = {
-            "hooks": {
-                "PreToolUse": [
-                    {
-                        "matcher": "Bash|Write|Edit|NotebookEdit|Read|Grep",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": sys.executable,
-                                "args": [standalone_hook_path2],
-                            }
-                        ],
-                    }
-                ]
-            }
-        }
-        with open(settings_file2, "w") as f:
-            json.dump(settings2, f)
 
-        proc2 = subprocess.run(
-            [sys.executable, unmerge_script, settings_file2],
+def test_16_unmerge_notes_when_plugin_in_cache():
+    """Uninstall-side counterpart to test 13: settings.json has only the
+    standalone gate's hook entry (no enabledPlugins signal), but a
+    plugins-cache directory for the plugin exists on disk. After removing
+    the standalone entry, _unmerge_settings.py must still note that the
+    plugin still appears to be installed."""
+    tmp, claude_dir = fresh_home()
+    with tmp:
+        _make_plugin_cache_dir(claude_dir)
+        settings_file = os.path.join(claude_dir, "settings.json")
+        settings = {"hooks": {"PreToolUse": [_standalone_hook_entry()]}}
+        with open(settings_file, "w") as f:
+            json.dump(settings, f)
+
+        unmerge_script = os.path.join(REPO_ROOT, "install", "_unmerge_settings.py")
+        proc = subprocess.run(
+            [sys.executable, unmerge_script, settings_file],
             capture_output=True,
             text=True,
             timeout=10,
         )
 
         check(
-            "14. _unmerge_settings.py stays silent (no plugin-still-installed "
-            "note) when no plugin-shaped entry is present",
-            proc2.returncode == 0 and "token-optimizer-plugin" not in proc2.stdout,
-            "rc={0} stdout={1!r}".format(proc2.returncode, proc2.stdout),
+            "16. _unmerge_settings.py notes on stdout that the plugin still "
+            "appears to be installed (plugins-cache signal)",
+            proc.returncode == 0
+            and "token-optimizer-plugin" in proc.stdout
+            and "still appears to be installed" in proc.stdout,
+            "rc={0} stdout={1!r} stderr={2!r}".format(
+                proc.returncode, proc.stdout, proc.stderr
+            ),
+        )
+
+
+def test_17_unmerge_silent_when_plugin_absent():
+    """Critical regression guard for the uninstall side, mirroring test 14:
+    only the standalone entry is present, no enabledPlugins entry, no
+    plugins-cache directory for this plugin - _unmerge_settings.py must stay
+    silent about plugin coexistence."""
+    tmp, claude_dir = fresh_home()
+    with tmp:
+        settings_file = os.path.join(claude_dir, "settings.json")
+        settings = {"hooks": {"PreToolUse": [_standalone_hook_entry()]}}
+        with open(settings_file, "w") as f:
+            json.dump(settings, f)
+
+        unmerge_script = os.path.join(REPO_ROOT, "install", "_unmerge_settings.py")
+        proc = subprocess.run(
+            [sys.executable, unmerge_script, settings_file],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        check(
+            "17. _unmerge_settings.py stays silent (no plugin-still-installed "
+            "note) when genuinely neither real signal is present",
+            proc.returncode == 0 and "token-optimizer-plugin" not in proc.stdout,
+            "rc={0} stdout={1!r}".format(proc.returncode, proc.stdout),
+        )
+
+
+def test_18_uninstall_sh_noninteractive_stdin_exits_0():
+    """Finding 16 regression: under `set -euo pipefail`, uninstall.sh's old
+    `read -r -p ...` prompt died on EOF when stdin wasn't a terminal (e.g.
+    piped from /dev/null, as in CI or any non-interactive invocation),
+    aborting before its closing "uninstalled" message ever printed and
+    leaving the state directory behind. Build a fixture that looks like a
+    completed standalone install (gate script + hook entry + state dir all
+    present) under a fake HOME, run uninstall.sh with stdin from /dev/null,
+    and confirm it exits 0, prints the final "uninstalled" line, explains
+    that it left the state dir in place (since it couldn't prompt), and
+    that the state dir is in fact still there."""
+    tmp, claude_dir = fresh_home()
+    with tmp:
+        hooks_dir = os.path.join(claude_dir, "hooks")
+        os.makedirs(hooks_dir, exist_ok=True)
+        gate_dest = os.path.join(hooks_dir, "token_optimizer_gate.py")
+        with open(STANDALONE_HOOK_PATH) as src, open(gate_dest, "w") as dst:
+            dst.write(src.read())
+
+        settings_file = os.path.join(claude_dir, "settings.json")
+        settings = {"hooks": {"PreToolUse": [_standalone_hook_entry()]}}
+        with open(settings_file, "w") as f:
+            json.dump(settings, f)
+
+        state_dir = os.path.join(claude_dir, ".token-optimizer-state")
+        os.makedirs(state_dir, exist_ok=True)
+        with open(os.path.join(state_dir, "dummy.txt"), "w") as f:
+            f.write("counter data")
+
+        uninstall_script = os.path.join(REPO_ROOT, "install", "uninstall.sh")
+        env = os.environ.copy()
+        env["HOME"] = tmp.name
+        with open(os.devnull, "r") as devnull:
+            proc = subprocess.run(
+                ["bash", uninstall_script],
+                stdin=devnull,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=15,
+            )
+
+        state_dir_preserved = os.path.isdir(state_dir)
+
+        check(
+            "18. uninstall.sh exits 0 and prints its final line when stdin isn't "
+            "a terminal, instead of dying at the interactive prompt",
+            proc.returncode == 0
+            and "token-optimizer uninstalled" in proc.stdout
+            and "leaving the state directory" in proc.stdout
+            and state_dir_preserved,
+            "rc={0} stdout={1!r} stderr={2!r}".format(
+                proc.returncode, proc.stdout, proc.stderr
+            ),
+        )
+
+
+def test_19_unmerge_restores_missing_hooks_key():
+    """Finding 17 regression: if settings.json had NO "hooks" key before the
+    standalone hook was installed (so after install, hooks.PreToolUse holds
+    exactly the one entry we added and nothing else), uninstalling it should
+    restore settings.json to its exact pre-install shape - no "hooks" key at
+    all - rather than leaving behind an empty
+    {"hooks": {"PreToolUse": []}}."""
+    tmp, claude_dir = fresh_home()
+    with tmp:
+        settings_file = os.path.join(claude_dir, "settings.json")
+        settings = {
+            "hooks": {"PreToolUse": [_standalone_hook_entry()]},
+            "someOtherKey": "untouched",
+        }
+        with open(settings_file, "w") as f:
+            json.dump(settings, f)
+
+        unmerge_script = os.path.join(REPO_ROOT, "install", "_unmerge_settings.py")
+        proc = subprocess.run(
+            [sys.executable, unmerge_script, settings_file],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        with open(settings_file) as f:
+            after = json.load(f)
+
+        check(
+            "19. _unmerge_settings.py drops the 'hooks' key entirely (not "
+            "present-and-empty) when removing the only entry it ever held, "
+            "and leaves other keys untouched",
+            proc.returncode == 0
+            and "hooks" not in after
+            and after.get("someOtherKey") == "untouched",
+            "rc={0} after={1!r} stderr={2!r}".format(
+                proc.returncode, after, proc.stderr
+            ),
         )
 
 
@@ -688,9 +823,14 @@ def main():
     test_9_plugin_denies_write_to_real_settings()
     test_10_corrupt_counter_self_heals()
     test_11_concurrent_writes_no_torn_state_file()
-    test_12_merge_warns_when_plugin_also_installed()
-    test_13_merge_silent_when_plugin_absent()
-    test_14_unmerge_warns_when_plugin_still_installed()
+    test_12_merge_warns_when_plugin_enabled_in_settings()
+    test_13_merge_warns_when_plugin_in_cache()
+    test_14_merge_silent_when_plugin_absent()
+    test_15_unmerge_notes_when_plugin_enabled_in_settings()
+    test_16_unmerge_notes_when_plugin_in_cache()
+    test_17_unmerge_silent_when_plugin_absent()
+    test_18_uninstall_sh_noninteractive_stdin_exits_0()
+    test_19_unmerge_restores_missing_hooks_key()
 
     print("")
     passed = sum(1 for _, status, _ in results if status == "PASS")

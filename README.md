@@ -93,7 +93,10 @@ This will:
   `scout`/`runner`/`builder` agent, say — it is left untouched, and the installer prints a
   message saying so for each agent it skipped.
 
-This only takes effect in **new** Claude Code sessions.
+This takes effect immediately in the **current** running session — the very next matched tool
+call after `install.sh` runs gets gated, no restart needed. (The plugin path in Option A behaves
+the same way on install/uninstall; see the `/plugin disable` note above for the one operation
+that specifically requires a new session.)
 
 **Finding a Python interpreter on Windows.** `install.sh` doesn't just check that `python3`,
 `python`, or `py` exist on `PATH` (`command -v`) — it also runs each candidate with a real
