@@ -132,10 +132,13 @@ proceed, so the shared Read/Grep free budget and all other gating behavior still
 correctly; you'll just see two status/error lines per gated call instead of one. This is
 noisy, not broken — an understood tradeoff of running both installs, not a bug.
 
-Both `install/install.sh` and `install/uninstall.sh` now detect this (best-effort, by scanning
-`~/.claude/settings.json`'s `PreToolUse` entries for a plugin-cache-shaped path) and print a
-non-fatal warning telling you the other install is also present and how to remove it, without
-blocking or touching the plugin's own files.
+Both `install/install.sh` and `install/uninstall.sh` now detect this and print a non-fatal
+warning telling you the other install is also present and how to remove it, without blocking
+or touching the plugin's own files. Detection is best-effort and checks two signals: whether
+`~/.claude/settings.json`'s `enabledPlugins` map has a `token-optimizer-plugin@<marketplace>`
+key (a key set to `false`, i.e. installed but disabled, still counts), or whether a
+`~/.claude/plugins/cache/<marketplace>/token-optimizer-plugin/` directory exists. The plugin's
+own hook is not written into `settings.json`, so it is never found under `hooks.PreToolUse`.
 
 ## What gets blocked vs. allowed
 
