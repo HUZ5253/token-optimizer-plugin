@@ -36,25 +36,13 @@ setups without plugin support.
 
 ### Option A: Plugin install (recommended)
 
-> **Windows warning: `python3` may be a non-functional stub, and a python.org install
-> alone will not fix it.** On a default Windows machine, `python3` on `PATH` is
-> commonly the Microsoft Store's alias stub — it exists and passes every presence
-> check (`command -v python3`, `where python3`, etc.), but exits with code 9009 when
-> actually spawned. The hooks this plugin installs run via `hooks/hooks.json`'s
-> `"command": "python3"`, so when the stub is what's on `PATH`, the gate never runs:
-> it fails open (nothing gets blocked), and Claude Code shows a hook error on every
-> matched tool call. **Installing Python from python.org is not sufficient by
-> itself** — that installer creates `python.exe`, never `python3.exe`, so it doesn't
-> change what `python3` resolves to. **How to check:** run `python3 -c "import sys"` —
-> a presence check like `command -v`/`where` will *not* catch this; only actually
-> trying to run the interpreter does. **How to fix it:** either (a) disable the Store
-> alias under **Settings > Apps > Advanced app settings > App execution aliases**, or
-> (b) copy `python.exe` to `python3.exe` inside your Python installation directory,
-> making sure that directory comes *before* the WindowsApps alias directory on
-> `PATH`. Option B below (the standalone installer) detects and reports this
-> automatically — it runs a real functional probe before writing its hook entry.
-> Option A has no install step at all (it's a slash command, not a script), so
-> there's nothing in the plugin path that can catch this for you.
+> **Windows warning: `python3` may be a non-functional stub, and a python.org install alone will not fix it.** On a default Windows machine, `python3` on `PATH` is commonly the Microsoft Store's alias stub — it exists and passes every presence check (`command -v python3`, `where python3`, etc.), but fails when actually spawned, printing:
+>
+> ```
+> Python was not found; run without arguments to install from the Microsoft Store, or disable this shortcut from Settings > Apps > Advanced app settings > App execution aliases.
+> ```
+>
+> That message is the reliable signature — the exit code varies by how it's invoked (9009 on a direct spawn, 49 through some shells such as Git Bash), so don't match on a single number. The hooks this plugin installs run via `hooks/hooks.json`'s `"command": "python3"`, so when the stub is what's on `PATH`, the gate never runs: it fails open (nothing gets blocked), and Claude Code shows a hook error on every matched tool call, of the form `PreToolUse:Bash hook error: [python3 ...\hooks\gate.py ...]`. **Installing Python from python.org is not sufficient by itself** — that installer creates `python.exe`, never `python3.exe`, so it doesn't change what `python3` resolves to. **How to check:** run `python3 -c "import sys"` — a presence check like `command -v`/`where` will *not* catch this; only actually trying to run the interpreter does. **How to fix it:** either (a) disable the Store alias under **Settings > Apps > Advanced app settings > App execution aliases**, or (b) copy `python.exe` to `python3.exe` inside your Python installation directory, making sure that directory comes *before* the WindowsApps alias directory on `PATH`. Option B below (the standalone installer) detects and reports this automatically — it runs a real functional probe before writing its hook entry. Option A has no install step at all (it's a slash command, not a script), so there's nothing in the plugin path that can catch this for you.
 
 ```
 /plugin marketplace add HUZ5253/token-optimizer-plugin
@@ -140,6 +128,11 @@ one from your `~/.claude/settings.json`. Both must independently exit 0 for the 
 proceed, so the shared Read/Grep free budget and all other gating behavior still works
 correctly; you'll just see two status/error lines per gated call instead of one. This is
 noisy, not broken — an understood tradeoff of running both installs, not a bug.
+
+Both `install/install.sh` and `install/uninstall.sh` now detect this (best-effort, by scanning
+`~/.claude/settings.json`'s `PreToolUse` entries for a plugin-cache-shaped path) and print a
+non-fatal warning telling you the other install is also present and how to remove it, without
+blocking or touching the plugin's own files.
 
 ## What gets blocked vs. allowed
 
@@ -260,9 +253,12 @@ the top-level session's model produces a real, calculable dollar saving here.
 **Subscription seat plans (Pro/Max/Team): the model doing the work is confirmed; whether that
 lowers your seat usage is inference, not a direct measurement.** On a seat plan, usage draws from
 a seat allowance rather than being metered in dollars. Subagent requests do count toward the same
-usage limits as the main conversation (confirmed), and model-family limits exist (you can hit a
-separate "Opus limit" from your general limit), which implies model choice does change which
-bucket a request draws from. What isn't measured is the next step — that Haiku tokens draw
+usage limits as the main conversation (confirmed), and model-family limits exist on some plans
+(you can hit a separate "Opus limit" from your general limit), which implies model choice does
+change which bucket a request draws from. Note that no such per-model bucket was visible on the
+Team plan this was tested against — it reported only a "5-hour limit" and a single "Weekly · all
+models" figure — so that argument rests on how these plans are documented generally, not on the
+measurements above. What isn't measured is the next step — that Haiku tokens draw
 proportionally less from that allowance than Opus tokens would for the same work. Plan usage is
 reported as a single "all models" aggregate figure with no per-model breakdown, so there's no way
 to directly observe that weighting; "lower consumption" here is a reasonable inference (metered
@@ -333,7 +329,7 @@ real issues were found and fixed:
    which is sufficient for this plugin's purpose (a soft budget nudge toward delegation, not a
    security boundary).
 
-The test suite (`python3 tests/test_gate.py`) runs 20 assertions covering both gate variants —
+The test suite (`python3 tests/test_gate.py`) runs 22 assertions covering both gate variants —
 `hooks/gate.py` (plugin) and `install/token_optimizer_gate.py` (standalone) — for every test
 where the distinction matters, plus the core allow/deny behavior and regression coverage for
 all three issues above. Test 9 specifically locks in that the **plugin** variant has no
