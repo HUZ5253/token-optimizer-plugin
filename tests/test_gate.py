@@ -7,6 +7,13 @@ No external dependencies beyond the stdlib. Run with:
 
     python3 tests/test_gate.py
 
+The suite also covers install/_merge_settings.py and
+install/_unmerge_settings.py's dual-install-path coexistence detection:
+tests 12/13 check that _merge_settings.py warns on stderr but still installs
+successfully when a plugin-shaped hook entry is already present in
+settings.json (and stays silent when nothing plugin-shaped is present), and
+test 14 checks the matching uninstall-side warning in _unmerge_settings.py.
+
 Exits 0 if all tests pass, non-zero if any fail (CI-friendly).
 """
 import concurrent.futures
@@ -539,6 +546,136 @@ def test_13_merge_silent_when_plugin_absent():
         )
 
 
+def test_14_unmerge_warns_when_plugin_still_installed():
+    """Uninstall-side counterpart to tests 12/13: install/_unmerge_settings.py
+    has its own warn_if_plugin_still_installed/references_plugin_install
+    helpers, exercised here for the first time. Positive case: settings.json
+    has both the standalone gate's hook entry (the thing being removed) and a
+    plugin-shaped hook entry (same pattern test 12 uses to simulate the
+    plugin also being installed); after removing the standalone entry,
+    _unmerge_settings.py must still succeed (rc=0) and must note that the
+    plugin still appears to be installed (that note is printed with a plain
+    print(), i.e. to stdout, unlike _merge_settings.py's stderr warning -
+    checked against the real output below rather than assumed). Negative
+    case: with no plugin-shaped entry present, no such note is printed."""
+    unmerge_script = os.path.join(REPO_ROOT, "install", "_unmerge_settings.py")
+
+    # Positive case: standalone entry + plugin-shaped entry both present.
+    tmp, claude_dir = fresh_home()
+    with tmp:
+        settings_file = os.path.join(claude_dir, "settings.json")
+        plugin_hook_path = os.path.join(
+            claude_dir,
+            "plugins",
+            "cache",
+            "some-marketplace",
+            "token-optimizer-plugin",
+            "1.0.0",
+            "hooks",
+            "gate.py",
+        )
+        standalone_hook_path = os.path.join(
+            REPO_ROOT, "install", "token_optimizer_gate.py"
+        )
+        settings = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash|Write|Edit|NotebookEdit|Read|Grep",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": sys.executable,
+                                "args": [standalone_hook_path],
+                            }
+                        ],
+                    },
+                    {
+                        "matcher": "Bash|Write|Edit|NotebookEdit|Read|Grep",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": sys.executable,
+                                "args": [plugin_hook_path],
+                            }
+                        ],
+                    },
+                ]
+            }
+        }
+        with open(settings_file, "w") as f:
+            json.dump(settings, f)
+
+        proc = subprocess.run(
+            [sys.executable, unmerge_script, settings_file],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        with open(settings_file) as f:
+            after = json.load(f)
+        remaining = after.get("hooks", {}).get("PreToolUse", [])
+        standalone_removed = not any(
+            "token_optimizer_gate.py" in str(h.get("args", []))
+            for entry in remaining
+            for h in entry.get("hooks", [])
+        )
+
+        check(
+            "14. _unmerge_settings.py removes the standalone entry (rc=0) and "
+            "notes on stdout that the plugin still appears to be installed",
+            proc.returncode == 0
+            and standalone_removed
+            and "token-optimizer-plugin" in proc.stdout
+            and "still appears to be installed" in proc.stdout,
+            "rc={0} stdout={1!r} stderr={2!r}".format(
+                proc.returncode, proc.stdout, proc.stderr
+            ),
+        )
+
+    # Negative case: only the standalone entry is present, no plugin-shaped
+    # entry - mirrors test 13's structure for the merge side.
+    tmp2, claude_dir2 = fresh_home()
+    with tmp2:
+        settings_file2 = os.path.join(claude_dir2, "settings.json")
+        standalone_hook_path2 = os.path.join(
+            REPO_ROOT, "install", "token_optimizer_gate.py"
+        )
+        settings2 = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash|Write|Edit|NotebookEdit|Read|Grep",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": sys.executable,
+                                "args": [standalone_hook_path2],
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        with open(settings_file2, "w") as f:
+            json.dump(settings2, f)
+
+        proc2 = subprocess.run(
+            [sys.executable, unmerge_script, settings_file2],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        check(
+            "14. _unmerge_settings.py stays silent (no plugin-still-installed "
+            "note) when no plugin-shaped entry is present",
+            proc2.returncode == 0 and "token-optimizer-plugin" not in proc2.stdout,
+            "rc={0} stdout={1!r}".format(proc2.returncode, proc2.stdout),
+        )
+
+
 def main():
     test_1_top_level_bash_denied()
     test_2_subagent_bash_allowed()
@@ -553,6 +690,7 @@ def main():
     test_11_concurrent_writes_no_torn_state_file()
     test_12_merge_warns_when_plugin_also_installed()
     test_13_merge_silent_when_plugin_absent()
+    test_14_unmerge_warns_when_plugin_still_installed()
 
     print("")
     passed = sum(1 for _, status, _ in results if status == "PASS")

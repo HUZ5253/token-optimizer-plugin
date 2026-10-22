@@ -355,8 +355,9 @@ directory without touching the real `~/.claude`.
   `hooks/hooks.json` declares `"command": "python3"` unconditionally, with no install
   step and no probe in front of it. On a default Windows machine that name commonly
   resolves to the Microsoft Store's alias stub: present on `PATH`, passing every
-  existence check, but exiting 9009 when actually spawned — so the hook fails open and
-  the gate silently never runs (see the Windows warning under
+  existence check, but exiting with a code that varies by how it's invoked (9009 on a
+  direct spawn, 49 through some shells such as Git Bash) when actually spawned — so the
+  hook fails open and the gate silently never runs (see the Windows warning under
   [Option A](#option-a-plugin-install-recommended) above). This is a *non-functional*
   interpreter reachable via a path with no installer in front of it to catch it, not a
   *missing* one an installer would refuse to proceed without — only Option B's
