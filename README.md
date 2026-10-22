@@ -26,8 +26,11 @@ setups without plugin support.
 
 ```
 /plugin marketplace add HUZ5253/token-optimizer-plugin
-/plugin install token-optimizer-plugin@HUZ5253/token-optimizer-plugin
+/plugin install token-optimizer-plugin@huz5253-tools
 ```
+
+The first command points at the GitHub repo; the second's `@...` suffix is the *marketplace*
+name (`huz5253-tools`, declared in `.claude-plugin/marketplace.json`), not the repo path.
 
 **To disable or uninstall:**
 
@@ -36,8 +39,13 @@ setups without plugin support.
 /plugin uninstall token-optimizer-plugin
 ```
 
-These are native CLI operations, not gated tool calls, so they always work even while the gate
-is active.
+These are native CLI operations, not gated tool calls, so the commands themselves always
+succeed even while the gate is active — but they differ in when the effect actually lands.
+`/plugin uninstall` is **immediate**: the gate stops firing in the current session right away.
+`/plugin disable` reports success and shows as disabled in `/plugin list`, but the gate keeps
+blocking the very next matched tool call in the already-running session regardless — it only
+actually stops gating starting in your **next** session. If you need the gate off right now,
+either use `/plugin uninstall`, or run `/plugin disable` and then restart the current session.
 
 The plugin also ships `agents/scout.md`, `agents/runner.md`, and `agents/builder.md` at the
 repo root — Claude Code auto-discovers a plugin's `agents/` directory by convention, so these
@@ -141,6 +149,36 @@ would be refused if the hook itself failed to run) — that option was deliberat
 chosen here, since it would contradict the fail-open philosophy documented throughout this
 project.
 
+## Does this actually save money?
+
+It depends on how you're billed, and the honest answer differs between the two cases.
+
+**API / pay-per-token billing: yes, and it's measurable.** Claude Code bills by actual token
+consumption on this path, and `/usage` computes per-model dollar estimates from real token
+counts. A subagent configured with `model: haiku` genuinely costs less per token than one
+running on Opus, so routing mechanical and scoped work to `scout`/`runner`/`builder` instead of
+the top-level session's model produces a real, calculable dollar saving here.
+
+**Subscription seat plans (Pro/Max/Team): genuinely unverified, not confirmed either way.** On a
+seat plan, usage draws from a seat allowance rather than being metered in dollars inside that
+allowance. Subagent requests do count toward the same usage limits as the main conversation
+(confirmed), and model-family limits exist (you can hit a separate "Opus limit" from your
+general limit), which implies model choice does change which bucket a request draws from — but
+there's no documented weighting or ratio between what a Haiku-subagent request costs against
+that seat window versus an Opus-subagent request. Don't take this plugin's premise on faith for
+a seat plan; verify it in your own account instead:
+
+- **`/tasks`** (Claude Code v2.1.242+) shows which model each running subagent is actually using.
+- **`/usage`** has a "Usage by model" breakdown (per-model tokens/dollars) and a "Plan usage
+  breakdown" showing the percentage attributed to subagents.
+- For Team/Enterprise, **OpenTelemetry events** (`claude_code.cost.usage`,
+  `claude_code.token.usage`) carry both a `model` field and a `query_source` field
+  (`main`/`subagent`/`auxiliary`) — the most precise way to confirm a given subagent call was
+  actually metered against the model it claims to run on.
+
+In short: real and documented for pay-per-token usage, plausible but currently undocumented for
+seat plans. Check the commands above against your own account rather than assuming either way.
+
 ## Security notes
 
 This logic went through several rounds of adversarial testing before being published. Three
@@ -172,13 +210,15 @@ real issues were found and fixed:
    read back as `0` and immediately rewritten correctly on the next call, rather than
    permanently disabling gating for that session (this was a real bug, now fixed).
 
-The test suite (`python3 tests/test_gate.py`) runs 16 assertions covering both gate variants —
+The test suite (`python3 tests/test_gate.py`) runs 18 assertions covering both gate variants —
 `hooks/gate.py` (plugin) and `install/token_optimizer_gate.py` (standalone) — for every test
 where the distinction matters, plus the core allow/deny behavior and regression coverage for
 all three issues above. Test 9 specifically locks in that the **plugin** variant has no
 self-repair exemption at all (per point 2 above) — only the standalone variant is allowed to
-touch its own `settings.json`. It also runs in GitHub Actions on every push and pull request
-(`.github/workflows/test.yml`).
+touch its own `settings.json`. Test 10 locks in the counter self-heal from point 3: a counter
+file corrupted with non-numeric garbage is read back as `0`, allowed, and rewritten correctly,
+then denies the very next call for that session instead of staying permanently stuck open. It
+also runs in GitHub Actions on every push and pull request (`.github/workflows/test.yml`).
 
 The standalone variant honors `CLAUDE_CONFIG_DIR` (checked before falling back to
 `HOME`/`USERPROFILE` via `os.path.expanduser`) when resolving `~/.claude`, which is also what

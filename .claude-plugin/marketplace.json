@@ -1,0 +1,12 @@
+{
+  "name": "huz5253-tools",
+  "description": "Plugins published by HUZ5253.",
+  "owner": { "name": "Huzaifa Jamnagarwala", "email": "huzaifa.sj5253@gmail.com" },
+  "plugins": [
+    {
+      "name": "token-optimizer-plugin",
+      "source": ".",
+      "description": "Hard-blocks mechanical Bash/Write/Edit/NotebookEdit/Read/Grep calls at the top-level session."
+    }
+  ]
+}

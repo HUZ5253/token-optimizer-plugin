@@ -305,6 +305,62 @@ def test_9_plugin_denies_write_to_real_settings():
             )
 
 
+def test_10_corrupt_counter_self_heals():
+    """Regression test for Findings 2 & 3: a corrupted (non-numeric) counter
+    state file must not permanently disable gating for that session. The
+    first post-corruption call should read the garbage back as 0, allow the
+    call, and rewrite the state file as a valid "1". The very next call for
+    the same session must then see count=1 and deny, proving the gate
+    re-engages instead of staying stuck open."""
+    for variant in ("standalone", "plugin"):
+        tmp, claude_dir = fresh_home()
+        with tmp:
+            env = {"HOME": tmp.name}
+            state_tmp, plugin_state_dir = fresh_plugin_state_dir()
+            with state_tmp:
+                state_dir = (
+                    os.path.join(claude_dir, ".token-optimizer-state")
+                    if variant == "standalone"
+                    else plugin_state_dir
+                )
+                session_id = "s10-corrupt"
+
+                # Pre-create the state dir and write literal garbage into the
+                # same hashed state filename the gate itself would use.
+                os.makedirs(state_dir, exist_ok=True)
+                expected = hashlib.sha256(
+                    session_id.encode("utf-8", "surrogatepass")
+                ).hexdigest()[:24] + ".count"
+                state_file = os.path.join(state_dir, expected)
+                with open(state_file, "w") as fd:
+                    fd.write("not-a-number")
+
+                rc1, out1, err1 = run_gate(
+                    {"tool_name": "Read", "session_id": session_id, "tool_input": {"file_path": "/tmp/x"}},
+                    env_overrides=env,
+                    variant=variant,
+                    state_dir=plugin_state_dir,
+                )
+                try:
+                    with open(state_file, "r") as fd:
+                        healed_value = fd.read().strip()
+                except Exception:
+                    healed_value = None
+
+                rc2, out2, err2 = run_gate(
+                    {"tool_name": "Grep", "session_id": session_id, "tool_input": {"pattern": "x"}},
+                    env_overrides=env,
+                    variant=variant,
+                    state_dir=plugin_state_dir,
+                )
+
+                check(
+                    "10. [{0}] corrupt counter self-heals: rc1==0, healed to \"1\", rc2==2 on re-engage".format(variant),
+                    rc1 == 0 and healed_value == "1" and rc2 == 2,
+                    "got rc1={0} healed_value={1!r} rc2={2}".format(rc1, healed_value, rc2),
+                )
+
+
 def main():
     test_1_top_level_bash_denied()
     test_2_subagent_bash_allowed()
@@ -315,6 +371,7 @@ def main():
     test_7_session_id_path_traversal()
     test_8_fake_settings_path_denied()
     test_9_plugin_denies_write_to_real_settings()
+    test_10_corrupt_counter_self_heals()
 
     print("")
     passed = sum(1 for _, status, _ in results if status == "PASS")
