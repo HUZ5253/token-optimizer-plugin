@@ -79,9 +79,10 @@ def main():
     if tool_name in ("Bash", "Write", "Edit"):
         deny(
             "token-optimizer hard rule: direct {0} calls are blocked at the top "
-            "level. Delegate via Agent(scout) for search/reads, Agent(runner) "
-            "for known commands, or Agent(builder) for scoped writes. To turn "
-            "this off: /plugin disable token-optimizer-plugin.".format(tool_name)
+            "level. Delegate via Agent(token-optimizer-plugin:scout) for "
+            "search/reads, Agent(token-optimizer-plugin:runner) for known "
+            "commands, or Agent(token-optimizer-plugin:builder) for scoped "
+            "writes. To turn this off: /plugin disable token-optimizer-plugin.".format(tool_name)
         )
         return
 
@@ -128,7 +129,7 @@ def main():
 
         deny(
             "token-optimizer hard rule: direct {0} #{1} this session - delegate "
-            "to Agent(scout) instead of continuing to read directly.".format(tool_name, count)
+            "to Agent(token-optimizer-plugin:scout) instead of continuing to read directly.".format(tool_name, count)
         )
         return
 

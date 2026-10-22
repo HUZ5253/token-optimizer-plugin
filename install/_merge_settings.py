@@ -7,8 +7,15 @@ hook entry into ~/.claude/settings.json.
   ~/.claude/settings.json.bak.<unix-timestamp>.<random-hex>.
 - Ensures hooks.PreToolUse is a list.
 - Idempotent: if an entry already references token_optimizer_gate.py, leaves
-  it alone and reports "already installed" instead of duplicating it.
-- Otherwise appends the new hook entry.
+  it alone and reports "already installed" instead of duplicating it. This
+  recognizes BOTH the old shell-form entry (a single "command" string like
+  'python3 "$HOME/.claude/hooks/token_optimizer_gate.py"') AND the new
+  exec-form entry ("command": "<interpreter>", "args": ["<abs-path>/
+  token_optimizer_gate.py"]), since the marker check matches the gate
+  script's filename anywhere in the command string OR the args array.
+- Otherwise appends the new hook entry, built in exec form (command + args
+  array) using the resolved Python interpreter passed on the command line
+  and an absolute path to the installed gate script.
 - Writes the merged JSON back, pretty-printed (indent=2), preserving every
   other key untouched.
 """
@@ -19,25 +26,34 @@ import sys
 import time
 
 HOOK_MARKER = "token_optimizer_gate.py"
-HOOK_ENTRY = {
-    "matcher": "Bash|Write|Edit|Read|Grep",
-    "hooks": [
-        {
-            "type": "command",
-            "command": 'python3 "$HOME/.claude/hooks/token_optimizer_gate.py"',
-            "timeout": 5,
-            "statusMessage": "token-optimizer routing gate",
-        }
-    ],
-}
+
+
+def build_hook_entry(interpreter, gate_path):
+    return {
+        "matcher": "Bash|Write|Edit|Read|Grep",
+        "hooks": [
+            {
+                "type": "command",
+                "command": interpreter,
+                "args": [gate_path],
+                "timeout": 5,
+                "statusMessage": "token-optimizer routing gate",
+            }
+        ],
+    }
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: _merge_settings.py <settings_file>", file=sys.stderr)
+    if len(sys.argv) != 3:
+        print("Usage: _merge_settings.py <settings_file> <python_interpreter>", file=sys.stderr)
         sys.exit(1)
 
     settings_file = sys.argv[1]
+    interpreter = sys.argv[2]
+    gate_path = os.path.join(
+        os.path.dirname(os.path.abspath(settings_file)), "hooks", "token_optimizer_gate.py"
+    )
+    hook_entry = build_hook_entry(interpreter, gate_path)
 
     existed = os.path.isfile(settings_file)
     data = {}
@@ -107,7 +123,7 @@ def main():
             print("A backup was still made at: {0}".format(backup_path))
         return
 
-    pre_tool_use.append(HOOK_ENTRY)
+    pre_tool_use.append(hook_entry)
     hooks["PreToolUse"] = pre_tool_use
     data["hooks"] = hooks
 
