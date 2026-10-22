@@ -36,6 +36,26 @@ setups without plugin support.
 
 ### Option A: Plugin install (recommended)
 
+> **Windows warning: `python3` may be a non-functional stub, and a python.org install
+> alone will not fix it.** On a default Windows machine, `python3` on `PATH` is
+> commonly the Microsoft Store's alias stub — it exists and passes every presence
+> check (`command -v python3`, `where python3`, etc.), but exits with code 9009 when
+> actually spawned. The hooks this plugin installs run via `hooks/hooks.json`'s
+> `"command": "python3"`, so when the stub is what's on `PATH`, the gate never runs:
+> it fails open (nothing gets blocked), and Claude Code shows a hook error on every
+> matched tool call. **Installing Python from python.org is not sufficient by
+> itself** — that installer creates `python.exe`, never `python3.exe`, so it doesn't
+> change what `python3` resolves to. **How to check:** run `python3 -c "import sys"` —
+> a presence check like `command -v`/`where` will *not* catch this; only actually
+> trying to run the interpreter does. **How to fix it:** either (a) disable the Store
+> alias under **Settings > Apps > Advanced app settings > App execution aliases**, or
+> (b) copy `python.exe` to `python3.exe` inside your Python installation directory,
+> making sure that directory comes *before* the WindowsApps alias directory on
+> `PATH`. Option B below (the standalone installer) detects and reports this
+> automatically — it runs a real functional probe before writing its hook entry.
+> Option A has no install step at all (it's a slash command, not a script), so
+> there's nothing in the plugin path that can catch this for you.
+
 ```
 /plugin marketplace add HUZ5253/token-optimizer-plugin
 /plugin install token-optimizer-plugin@huz5253-tools
@@ -145,9 +165,12 @@ optional `CLAUDE_CODE_SUBAGENT_MODEL` environment variable, then the parent sess
 session's model in that order, so delegated work normally runs on the cheaper model regardless
 of what the top-level session has selected. It's not an absolute lock, though: the docs don't
 rule out Claude passing a different per-invocation model override on a given call, which would
-take priority over the frontmatter. Treat the value proposition as "delegated work runs on each
-agent's configured model rather than whatever you've selected for the top-level session," not
-as an unconditional guarantee.
+take priority over the frontmatter. Live testing (see
+[Does this actually save money?](#does-this-actually-save-money)) confirmed the frontmatter
+model winning on all 7 observed calls, but 7 calls can't rule out a different override on some
+future one. Treat the value proposition as "delegated work runs on each agent's configured model
+rather than whatever you've selected for the top-level session," not as an unconditional
+guarantee.
 
 ### `onFailure` is deliberately fail-open
 
@@ -217,7 +240,16 @@ Neither of these is a plugin bug, but both affect real usage and are worth knowi
 
 ## Does this actually save money?
 
-It depends on how you're billed, and the honest answer differs between the two cases.
+It depends on how you're billed, and the honest answer differs between the two cases — but one
+piece of the premise is no longer in question either way you're billed.
+
+**Confirmed: the cheaper model actually does the delegated work.** Claude Code records a
+`resolvedModel` field per subagent invocation in the session transcript JSONL. Across seven real
+subagent calls made from Opus-running sessions, every `:scout`/`:runner` call (frontmatter
+`model: haiku`) resolved to `claude-haiku-5-5`, and the `:builder` call (frontmatter
+`model: sonnet`) resolved to `claude-sonnet-5-5` — seven for seven. That's direct, empirical
+confirmation that the frontmatter `model:` field determines which model actually serves a
+delegated request, not just a nominal default something else can quietly override.
 
 **API / pay-per-token billing: yes, and it's measurable.** Claude Code bills by actual token
 consumption on this path, and `/usage` computes per-model dollar estimates from real token
@@ -225,14 +257,18 @@ counts. A subagent configured with `model: haiku` genuinely costs less per token
 running on Opus, so routing mechanical and scoped work to `scout`/`runner`/`builder` instead of
 the top-level session's model produces a real, calculable dollar saving here.
 
-**Subscription seat plans (Pro/Max/Team): genuinely unverified, not confirmed either way.** On a
-seat plan, usage draws from a seat allowance rather than being metered in dollars inside that
-allowance. Subagent requests do count toward the same usage limits as the main conversation
-(confirmed), and model-family limits exist (you can hit a separate "Opus limit" from your
-general limit), which implies model choice does change which bucket a request draws from — but
-there's no documented weighting or ratio between what a Haiku-subagent request costs against
-that seat window versus an Opus-subagent request. Don't take this plugin's premise on faith for
-a seat plan; verify it in your own account instead:
+**Subscription seat plans (Pro/Max/Team): the model doing the work is confirmed; whether that
+lowers your seat usage is inference, not a direct measurement.** On a seat plan, usage draws from
+a seat allowance rather than being metered in dollars. Subagent requests do count toward the same
+usage limits as the main conversation (confirmed), and model-family limits exist (you can hit a
+separate "Opus limit" from your general limit), which implies model choice does change which
+bucket a request draws from. What isn't measured is the next step — that Haiku tokens draw
+proportionally less from that allowance than Opus tokens would for the same work. Plan usage is
+reported as a single "all models" aggregate figure with no per-model breakdown, so there's no way
+to directly observe that weighting; "lower consumption" here is a reasonable inference (metered
+allowances are generally weighted by model cost), not something confirmed the way the model
+routing above now is. Don't take the consumption half of this on faith; verify what you can in
+your own account instead:
 
 - **`/tasks`** (Claude Code v2.1.242+) shows which model each running subagent is actually using.
 - **`/usage`** has a "Usage by model" breakdown (per-model tokens/dollars) and a "Plan usage
@@ -242,8 +278,10 @@ a seat plan; verify it in your own account instead:
   (`main`/`subagent`/`auxiliary`) — the most precise way to confirm a given subagent call was
   actually metered against the model it claims to run on.
 
-In short: real and documented for pay-per-token usage, plausible but currently undocumented for
-seat plans. Check the commands above against your own account rather than assuming either way.
+In short: confirmed, in both cases, that the cheaper model is the one doing the delegated work;
+confirmed and measurable that this saves real dollars on pay-per-token billing; only the
+translation to lower seat-plan consumption remains an inference rather than a direct measurement.
+Check the commands above against your own account rather than assuming either way.
 
 Even setting the subscription-billing question aside entirely, the overhead data in
 [Why 3, and why Bash/Write/Edit stay fully gated](#why-3-and-why-bashwriteedit-stay-fully-gated)
@@ -317,9 +355,24 @@ directory without touching the real `~/.claude`.
 
 ## Known limitations
 
-- **Requires `python3` on `PATH`.** If it's missing, the installer refuses to run with a clear
-  error; if it's missing at hook-invocation time, the hook's own fail-open design covers it
-  (worst case the gate simply doesn't run — see `onFailure` above).
+- **The plugin path (Option A) has no way to catch a non-functional `python3`.**
+  `hooks/hooks.json` declares `"command": "python3"` unconditionally, with no install
+  step and no probe in front of it. On a default Windows machine that name commonly
+  resolves to the Microsoft Store's alias stub: present on `PATH`, passing every
+  existence check, but exiting 9009 when actually spawned — so the hook fails open and
+  the gate silently never runs (see the Windows warning under
+  [Option A](#option-a-plugin-install-recommended) above). This is a *non-functional*
+  interpreter reachable via a path with no installer in front of it to catch it, not a
+  *missing* one an installer would refuse to proceed without — only Option B's
+  standalone installer runs that functional probe, because only it has an install step
+  to run one in. It also can't be fixed in code: `hooks.json`'s `command` field is a
+  single static string with no OS-conditional branching, and there's no one command
+  name that's correct on every platform — `python3` is right on macOS/Linux and wrong
+  on default Windows, `python` is usually the reverse, `py` is Windows-only, and a
+  shell form would need Git Bash on Windows, where a *failing* shell-form hook can
+  actually **block** a call rather than fail open, a worse failure mode than the
+  current one. Documenting this as a limitation, rather than trading one
+  undiagnosable failure mode for a different one, is the deliberate choice here.
 - **The plugin variant's state directory.** `${CLAUDE_PLUGIN_DATA}` is documented, confirmed
   Claude Code behavior: it resolves to `~/.claude/plugins/data/<plugin-id>/`, is substituted
   correctly inside a hook's `args` array (exactly how `hooks/hooks.json` uses it), and is also
