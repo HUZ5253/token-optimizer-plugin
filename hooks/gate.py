@@ -26,7 +26,6 @@ import hashlib
 import json
 import os
 import sys
-import tempfile
 import time
 
 
@@ -34,7 +33,8 @@ def resolve_state_dir(cli_arg):
     for candidate in (cli_arg, os.environ.get("CLAUDE_PLUGIN_DATA")):
         if candidate and not candidate.startswith("${"):
             return candidate
-    return os.path.join(tempfile.gettempdir(), "token-optimizer-plugin-state")
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    return os.path.join(home, ".claude", "token-optimizer-plugin-state")
 
 
 def allow():
@@ -102,7 +102,7 @@ def main():
         allow()
         return
 
-    if tool_name in ("Bash", "Write", "Edit"):
+    if tool_name in ("Bash", "Write", "Edit", "NotebookEdit"):
         deny(
             "token-optimizer hard rule: direct {0} calls are blocked at the top "
             "level. Delegate via Agent(token-optimizer-plugin:scout) for "
@@ -114,7 +114,7 @@ def main():
 
     if tool_name in ("Read", "Grep"):
         try:
-            os.makedirs(state_dir, exist_ok=True)
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
             cutoff = time.time() - 2 * 86400
             for name in os.listdir(state_dir):
                 p = os.path.join(state_dir, name)

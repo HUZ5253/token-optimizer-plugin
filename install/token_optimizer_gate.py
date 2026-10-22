@@ -102,7 +102,7 @@ def main():
         allow()
         return
 
-    if tool_name in ("Edit", "Write"):
+    if tool_name in ("Edit", "Write", "NotebookEdit"):
         raw_path = str(tool_input.get("file_path") or "")
         if raw_path:
             try:
@@ -113,7 +113,7 @@ def main():
                 allow()
                 return
 
-    if tool_name in ("Bash", "Write", "Edit"):
+    if tool_name in ("Bash", "Write", "Edit", "NotebookEdit"):
         deny(
             "token-optimizer hard rule: direct {0} calls are blocked at the top "
             "level. This is T0/T1 mechanical or scoped work - delegate it via "

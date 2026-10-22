@@ -3,19 +3,20 @@
 hook entry into ~/.claude/settings.json.
 
 - Loads existing JSON (or starts from {} if the file is missing/empty).
-- Backs up the existing file first (only if it existed) to
-  ~/.claude/settings.json.bak.<unix-timestamp>.<random-hex>.
 - Ensures hooks.PreToolUse is a list.
 - Idempotent: if an entry already references token_optimizer_gate.py, leaves
-  it alone and reports "already installed" instead of duplicating it. This
+  it alone and reports "already installed" instead of duplicating it, and
+  does NOT write a backup in that case since nothing is modified. This
   recognizes BOTH the old shell-form entry (a single "command" string like
   'python3 "$HOME/.claude/hooks/token_optimizer_gate.py"') AND the new
   exec-form entry ("command": "<interpreter>", "args": ["<abs-path>/
   token_optimizer_gate.py"]), since the marker check matches the gate
   script's filename anywhere in the command string OR the args array.
-- Otherwise appends the new hook entry, built in exec form (command + args
-  array) using the resolved Python interpreter passed on the command line
-  and an absolute path to the installed gate script.
+- Otherwise, backs up the existing file (only if it existed) to
+  ~/.claude/settings.json.bak.<unix-timestamp>.<random-hex>, then appends
+  the new hook entry, built in exec form (command + args array) using the
+  resolved Python interpreter passed on the command line and an absolute
+  path to the installed gate script.
 - Writes the merged JSON back, pretty-printed (indent=2), preserving every
   other key untouched.
 """
@@ -30,7 +31,7 @@ HOOK_MARKER = "token_optimizer_gate.py"
 
 def build_hook_entry(interpreter, gate_path):
     return {
-        "matcher": "Bash|Write|Edit|Read|Grep",
+        "matcher": "Bash|Write|Edit|NotebookEdit|Read|Grep",
         "hooks": [
             {
                 "type": "command",
@@ -81,14 +82,6 @@ def main():
         )
         sys.exit(1)
 
-    backup_path = None
-    if existed:
-        backup_path = "{0}.bak.{1}.{2}".format(
-            settings_file, int(time.time()), secrets.token_hex(4)
-        )
-        with open(settings_file, "r") as src, open(backup_path, "w") as dst:
-            dst.write(src.read())
-
     hooks = data.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         print("Error: existing 'hooks' key is not an object.", file=sys.stderr)
@@ -119,9 +112,15 @@ def main():
 
     if already_installed:
         print("token-optimizer: already installed (PreToolUse hook entry found) - leaving settings.json unchanged.")
-        if backup_path:
-            print("A backup was still made at: {0}".format(backup_path))
         return
+
+    backup_path = None
+    if existed:
+        backup_path = "{0}.bak.{1}.{2}".format(
+            settings_file, int(time.time()), secrets.token_hex(4)
+        )
+        with open(settings_file, "r") as src, open(backup_path, "w") as dst:
+            dst.write(src.read())
 
     pre_tool_use.append(hook_entry)
     hooks["PreToolUse"] = pre_tool_use

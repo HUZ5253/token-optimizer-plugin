@@ -40,6 +40,7 @@ if [ ! -f "$GATE_SRC" ]; then
 fi
 
 cp "$GATE_SRC" "$GATE_DEST"
+trap 'rm -f "$GATE_DEST"' ERR
 chmod +x "$GATE_DEST"
 
 "$PY" "$SCRIPT_DIR/_merge_settings.py" "$SETTINGS_FILE" "$PY"
