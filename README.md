@@ -32,6 +32,43 @@ It ships two ways to install it: as a native Claude Code **plugin** (recommended
 **standalone installer** that merges a hook entry into your own `~/.claude/settings.json` for
 setups without plugin support.
 
+## When to use this — and when not to
+
+**Good fit: long, research-heavy sessions.** Reading across many files, large
+investigations, anything where the main context window is the scarce resource. The
+per-delegation overhead amortizes fine against bulky work, and the context-cleanliness
+benefit is real and already proven — see
+[Why 3, and why Bash/Write/Edit stay fully gated](#why-3-and-why-bashwriteedit-stay-fully-gated)
+below rather than re-deriving that argument here.
+
+**Bad fit: urgent or time-sensitive work, and sessions dominated by small mechanical
+operations.** The overhead isn't just tokens — it's latency you actually feel. Measured
+wall-clock durations for trivial, single-shot delegated calls:
+
+| Task | Tokens | Duration |
+|---|---|---|
+| "which file changed most recently" | 7,114 | 9.1s |
+| write an 11-byte file | 8,931 | 9.6s |
+| grep top-level files for a word | 15,861 | 28.3s |
+
+On urgent work full of small reads and edits, the gate adds ten to thirty seconds and
+thousands of tokens to operations that would otherwise take under a second — while
+you're also learning the delegation workflow, under time pressure, which is the worst
+moment to be learning it.
+
+**Three traps that bite hardest in a hurry:**
+
+- `/plugin disable` does **not** take effect in the running session — only
+  `/plugin uninstall` is immediate.
+- The gate applies to **every new session on the machine** once installed, not just the
+  one you wanted it for.
+- For small mechanical tasks, the gate plausibly costs more than it saves — see
+  [Why 3, and why Bash/Write/Edit stay fully gated](#why-3-and-why-bashwriteedit-stay-fully-gated)
+  below for the economics behind that.
+
+**Escape hatch:** `/plugin uninstall` is immediate; `/plugin disable` only applies
+starting in your next session.
+
 ## Installation
 
 ### Option A: Plugin install (recommended)

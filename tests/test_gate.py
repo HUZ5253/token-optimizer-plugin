@@ -33,6 +33,21 @@ never fired on any real install):
   before install, rather than leaving behind an empty
   {"hooks": {"PreToolUse": []}}.
 
+DURABLE LESSON FOR ANYONE ADDING TESTS TO THIS FILE: a green result only means
+something if the guarded branch actually ran. When a test targets a guard or
+conditional (an `if`, a `[ -t 0 ]` check, a signal-detection path), assert that
+the branch under test was actually entered - not just that the command exited
+0 or that the end state looked plausible. It is easy to write a fixture that
+never triggers the condition at all (e.g. a state directory the guard checks
+for simply doesn't exist in that fixture), in which case the test passes by
+skipping the relevant code entirely, pass or fail, and tells you nothing. It
+is equally easy to write a test that fabricates the exact value the code
+under test is looking for, rather than exercising the real path that is
+supposed to produce that value - which also passes without the feature ever
+having worked. This project has shipped both mistakes before. A suite can
+grow from 20 tests to 24 while correctness goes down, if the new tests assert
+on fabricated or never-entered conditions instead of reality.
+
 Exits 0 if all tests pass, non-zero if any fail (CI-friendly).
 """
 import concurrent.futures
