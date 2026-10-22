@@ -20,11 +20,25 @@ import os
 import sys
 import time
 
-STATE_DIR = os.path.expanduser("~/.claude/.token-optimizer-state")
-GLOBAL_SETTINGS = {
-    os.path.realpath(os.path.expanduser("~/.claude/settings.json")),
-    os.path.realpath(os.path.expanduser("~/.claude/settings.local.json")),
-}
+
+def claude_dir():
+    """~/.claude, honoring CLAUDE_CONFIG_DIR, and reading HOME directly so a
+    test (or anything else) that sets HOME in the environment is respected
+    even on Windows, where os.path.expanduser consults USERPROFILE instead
+    and silently ignores a HOME override."""
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    if override:
+        return override
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    return os.path.join(home, ".claude")
+
+
+def global_settings():
+    base = claude_dir()
+    return {
+        os.path.realpath(os.path.join(base, "settings.json")),
+        os.path.realpath(os.path.join(base, "settings.local.json")),
+    }
 
 
 def allow():
@@ -36,9 +50,9 @@ def deny(msg):
     sys.exit(2)
 
 
-def session_state_path(session_id):
+def session_state_path(state_dir, session_id):
     digest = hashlib.sha256(str(session_id).encode("utf-8", "surrogatepass")).hexdigest()[:24]
-    return os.path.join(STATE_DIR, digest + ".count")
+    return os.path.join(state_dir, digest + ".count")
 
 
 def read_count(state_file):
@@ -95,7 +109,7 @@ def main():
                 resolved = os.path.realpath(os.path.expanduser(raw_path))
             except Exception:
                 resolved = ""
-            if resolved in GLOBAL_SETTINGS:
+            if resolved in global_settings():
                 allow()
                 return
 
@@ -110,18 +124,19 @@ def main():
         return
 
     if tool_name in ("Read", "Grep"):
+        state_dir = os.path.join(claude_dir(), ".token-optimizer-state")
         try:
-            os.makedirs(STATE_DIR, exist_ok=True)
+            os.makedirs(state_dir, exist_ok=True)
             cutoff = time.time() - 2 * 86400
-            for name in os.listdir(STATE_DIR):
-                p = os.path.join(STATE_DIR, name)
+            for name in os.listdir(state_dir):
+                p = os.path.join(state_dir, name)
                 if os.path.isfile(p) and os.path.getmtime(p) < cutoff:
                     os.remove(p)
         except Exception:
             allow()
             return
 
-        state_file = session_state_path(session_id)
+        state_file = session_state_path(state_dir, session_id)
         count = read_count(state_file)
         if count is None:
             allow()
