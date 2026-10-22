@@ -13,11 +13,12 @@ even while this gate is active.
 Allows (exit 0):
   - Any call where agent_type is set (a named subagent is already executing
     delegated work).
-  - Exactly one direct Read/Grep per session (a single trivial read).
+  - Up to FREE_READ_BUDGET direct Read/Grep calls per session (a small
+    batch of trivial reads).
 
 Denies (exit 2, stderr fed back to the model):
   - Any direct Bash/Write/Edit at the top level.
-  - A second (or later) direct Read/Grep in the same session.
+  - A Read/Grep in the same session beyond the free budget.
 
 Fails open on any error: a bug here must never lock the session out.
 """
@@ -27,6 +28,16 @@ import json
 import os
 import sys
 import time
+
+# Free direct Read/Grep calls allowed per session before delegation is
+# forced. This is a deliberate, tunable judgment call (not a hardcoded
+# magic number): live-measured subagent delegation overhead is large
+# enough (7k-16k tokens per trivial single-shot call) that forcing
+# delegation after just one direct read is economically counterproductive
+# for the common case of checking a couple of related files. 3 keeps real
+# exploration batches (4+) forced through scout, where delegation's
+# overhead actually amortizes.
+FREE_READ_BUDGET = 3
 
 
 def resolve_state_dir(cli_arg):
@@ -129,11 +140,11 @@ def main():
         if count is None:
             allow()
             return
-        if count >= 1:
+        if count >= FREE_READ_BUDGET:
             deny(
-                "token-optimizer hard rule: you have already used your one "
-                "direct {0} this session - delegate to "
-                "Agent(token-optimizer-plugin:scout) instead.".format(tool_name)
+                "token-optimizer hard rule: you have already used your {1} "
+                "free direct {0} calls this session - delegate to "
+                "Agent(token-optimizer-plugin:scout) instead.".format(tool_name, FREE_READ_BUDGET)
             )
             return
         write_count(state_file, count + 1)

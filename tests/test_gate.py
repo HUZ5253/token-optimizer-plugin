@@ -9,6 +9,7 @@ No external dependencies beyond the stdlib. Run with:
 
 Exits 0 if all tests pass, non-zero if any fail (CI-friendly).
 """
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -112,26 +113,38 @@ def test_2_subagent_bash_allowed():
                 )
 
 
-def test_3_first_read_allowed():
+def test_3_free_budget_reads_allowed():
+    """Up to 3 free direct Reads per session must all be allowed."""
     for variant in ("standalone", "plugin"):
         tmp, claude_dir = fresh_home()
         with tmp:
             state_tmp, state_dir = fresh_plugin_state_dir()
             with state_tmp:
-                rc, out, err = run_gate(
-                    {"tool_name": "Read", "session_id": "s3-fresh", "tool_input": {"file_path": "/tmp/x"}},
-                    env_overrides={"HOME": tmp.name},
-                    variant=variant,
-                    state_dir=state_dir,
-                )
+                env = {"HOME": tmp.name}
+                session_id = "s3-fresh"
+                rcs = []
+                for i in range(3):
+                    rc, out, err = run_gate(
+                        {
+                            "tool_name": "Read",
+                            "session_id": session_id,
+                            "tool_input": {"file_path": "/tmp/x{0}".format(i)},
+                        },
+                        env_overrides=env,
+                        variant=variant,
+                        state_dir=state_dir,
+                    )
+                    rcs.append(rc)
                 check(
-                    "3. [{0}] first top-level Read in a fresh session -> exit 0".format(variant),
-                    rc == 0,
-                    "got rc={0}".format(rc),
+                    "3. [{0}] first 3 top-level Reads in a fresh session -> all exit 0".format(variant),
+                    all(rc == 0 for rc in rcs),
+                    "got rcs={0}".format(rcs),
                 )
 
 
-def test_4_second_read_denied():
+def test_4_read_beyond_budget_denied():
+    """The 4th direct Read in the same session, after the free budget of 3
+    is used up, must be denied."""
     for variant in ("standalone", "plugin"):
         tmp, claude_dir = fresh_home()
         with tmp:
@@ -139,22 +152,29 @@ def test_4_second_read_denied():
             with state_tmp:
                 env = {"HOME": tmp.name}
                 session_id = "s4-repeat"
-                rc1, _, _ = run_gate(
-                    {"tool_name": "Read", "session_id": session_id, "tool_input": {"file_path": "/tmp/x"}},
-                    env_overrides=env,
-                    variant=variant,
-                    state_dir=state_dir,
-                )
-                rc2, out2, err2 = run_gate(
+                rcs = []
+                for i in range(3):
+                    rc, _, _ = run_gate(
+                        {
+                            "tool_name": "Read",
+                            "session_id": session_id,
+                            "tool_input": {"file_path": "/tmp/x{0}".format(i)},
+                        },
+                        env_overrides=env,
+                        variant=variant,
+                        state_dir=state_dir,
+                    )
+                    rcs.append(rc)
+                rc4, out4, err4 = run_gate(
                     {"tool_name": "Read", "session_id": session_id, "tool_input": {"file_path": "/tmp/y"}},
                     env_overrides=env,
                     variant=variant,
                     state_dir=state_dir,
                 )
                 check(
-                    "4. [{0}] second top-level Read, same session -> exit 2".format(variant),
-                    rc1 == 0 and rc2 == 2,
-                    "got rc1={0} rc2={1}".format(rc1, rc2),
+                    "4. [{0}] 4th top-level Read, same session, beyond budget -> exit 2".format(variant),
+                    all(rc == 0 for rc in rcs) and rc4 == 2,
+                    "got rcs={0} rc4={1}".format(rcs, rc4),
                 )
 
 
@@ -309,9 +329,11 @@ def test_10_corrupt_counter_self_heals():
     """Regression test for Findings 2 & 3: a corrupted (non-numeric) counter
     state file must not permanently disable gating for that session. The
     first post-corruption call should read the garbage back as 0, allow the
-    call, and rewrite the state file as a valid "1". The very next call for
-    the same session must then see count=1 and deny, proving the gate
-    re-engages instead of staying stuck open."""
+    call, and rewrite the state file as a valid "1". With the free budget
+    now at 3, two more calls for the same session must still be allowed
+    (count becomes 2, then 3), and the call after that must deny, proving
+    the gate re-engages at the budget boundary instead of staying stuck
+    open."""
     for variant in ("standalone", "plugin"):
         tmp, claude_dir = fresh_home()
         with tmp:
@@ -353,25 +375,102 @@ def test_10_corrupt_counter_self_heals():
                     variant=variant,
                     state_dir=plugin_state_dir,
                 )
+                rc3, out3, err3 = run_gate(
+                    {"tool_name": "Grep", "session_id": session_id, "tool_input": {"pattern": "y"}},
+                    env_overrides=env,
+                    variant=variant,
+                    state_dir=plugin_state_dir,
+                )
+                rc4, out4, err4 = run_gate(
+                    {"tool_name": "Grep", "session_id": session_id, "tool_input": {"pattern": "z"}},
+                    env_overrides=env,
+                    variant=variant,
+                    state_dir=plugin_state_dir,
+                )
 
                 check(
-                    "10. [{0}] corrupt counter self-heals: rc1==0, healed to \"1\", rc2==2 on re-engage".format(variant),
-                    rc1 == 0 and healed_value == "1" and rc2 == 2,
-                    "got rc1={0} healed_value={1!r} rc2={2}".format(rc1, healed_value, rc2),
+                    "10. [{0}] corrupt counter self-heals: rc1==0, healed to \"1\", "
+                    "rc2==0, rc3==0, rc4==2 at budget boundary".format(variant),
+                    rc1 == 0 and healed_value == "1" and rc2 == 0 and rc3 == 0 and rc4 == 2,
+                    "got rc1={0} healed_value={1!r} rc2={2} rc3={3} rc4={4}".format(
+                        rc1, healed_value, rc2, rc3, rc4
+                    ),
+                )
+
+
+def test_11_concurrent_writes_no_torn_state_file():
+    """Regression test for Finding 3: many gate processes racing to
+    check-then-increment the SAME session's counter concurrently must never
+    leave the state file torn/corrupted. The atomic os.replace() swap means
+    the file is always either fully the old content or fully the new
+    content, never a partial write - so this test asserts the file stays
+    PARSEABLE as an integer after the race, not that the final count is
+    exactly precise (true concurrent increments can legitimately race on
+    the exact value; only non-corruption is being asserted here)."""
+    for variant in ("standalone", "plugin"):
+        tmp, claude_dir = fresh_home()
+        with tmp:
+            env = {"HOME": tmp.name}
+            state_tmp, plugin_state_dir = fresh_plugin_state_dir()
+            with state_tmp:
+                state_dir = (
+                    os.path.join(claude_dir, ".token-optimizer-state")
+                    if variant == "standalone"
+                    else plugin_state_dir
+                )
+                session_id = "s11-concurrent"
+                expected = hashlib.sha256(
+                    session_id.encode("utf-8", "surrogatepass")
+                ).hexdigest()[:24] + ".count"
+                state_file = os.path.join(state_dir, expected)
+
+                def fire_one(i):
+                    return run_gate(
+                        {
+                            "tool_name": "Read",
+                            "session_id": session_id,
+                            "tool_input": {"file_path": "/tmp/x{0}".format(i)},
+                        },
+                        env_overrides=env,
+                        variant=variant,
+                        state_dir=plugin_state_dir,
+                    )
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+                    list(pool.map(fire_one, range(10)))
+
+                parseable = True
+                detail = ""
+                try:
+                    with open(state_file, "r") as fd:
+                        int(fd.read().strip())
+                except Exception as exc:
+                    parseable = False
+                    detail = "[{0}] state file not parseable as int after concurrent writes: {1}".format(
+                        variant, exc
+                    )
+
+                check(
+                    "11. [{0}] concurrent writes to shared session -> state file stays parseable (no torn write)".format(
+                        variant
+                    ),
+                    parseable,
+                    detail,
                 )
 
 
 def main():
     test_1_top_level_bash_denied()
     test_2_subagent_bash_allowed()
-    test_3_first_read_allowed()
-    test_4_second_read_denied()
+    test_3_free_budget_reads_allowed()
+    test_4_read_beyond_budget_denied()
     test_5_write_real_settings_allowed()
     test_6_malformed_json_fails_open()
     test_7_session_id_path_traversal()
     test_8_fake_settings_path_denied()
     test_9_plugin_denies_write_to_real_settings()
     test_10_corrupt_counter_self_heals()
+    test_11_concurrent_writes_no_torn_state_file()
 
     print("")
     passed = sum(1 for _, status, _ in results if status == "PASS")

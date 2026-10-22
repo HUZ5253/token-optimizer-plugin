@@ -8,13 +8,25 @@ instruction asking nicely) is easy to forget or skip under pressure; this hook m
 structurally impossible to bypass for the gated tool calls, short of explicitly turning the
 hook off.
 
+**What this is actually for.** The proven, unconditional benefit is keeping the top-level
+session's context clean and enforcing a deliberate boundary around side-effecting actions
+(`Bash`/`Write`/`Edit`/`NotebookEdit`) — that holds regardless of token economics. Token/cost
+savings are real but workload-dependent: they show up for bulky delegated work (reading or
+searching many files, a substantial scoped implementation) and can be net-negative for a
+trivial single-shot call, because every delegation carries several thousand tokens of fixed
+subagent overhead. See [Why 3, and why Bash/Write/Edit stay fully gated](#why-3-and-why-bashwriteedit-stay-fully-gated)
+below for the measured data behind that distinction, and
+[Does this actually save money?](#does-this-actually-save-money) for the billing caveats.
+
 Delegated work runs on each agent's configured model (`scout`/`runner` on Haiku, `builder` on
 Sonnet) rather than whatever model you've selected for the top-level session — see
 [Model selection](#model-selection-caveat) below for the one case where that isn't absolute.
 
-`Read` and `Grep` share a single free direct use per session: whichever one you call first
-uses it up, and both are gated after that (see the table below). `Glob` is deliberately left out of the gate entirely — it's cheap and read-only, so
-this is a decision, not an oversight.
+`Read` and `Grep` share a combined free-direct-use budget per session (`FREE_READ_BUDGET`,
+currently 3): whichever one you call first starts drawing it down, and both are gated once it's
+exhausted (see the table below). `Glob` is deliberately left out of the gate entirely — it's cheap and read-only, so
+this is a decision, not an oversight (though see the sharp-edges note below about `Glob "*"`
+recursing further than expected on some setups).
 
 It ships two ways to install it: as a native Claude Code **plugin** (recommended), and as a
 **standalone installer** that merges a hook entry into your own `~/.claude/settings.json` for
@@ -105,17 +117,17 @@ left alone.
 If you install the plugin **and** run the standalone installer, you'll end up with two
 separate `PreToolUse` hook entries firing on every matched tool call — one from the plugin,
 one from your `~/.claude/settings.json`. Both must independently exit 0 for the call to
-proceed, so the "one free read" budget and all other gating behavior still works correctly;
-you'll just see two status/error lines per gated call instead of one. This is noisy, not
-broken — an understood tradeoff of running both installs, not a bug.
+proceed, so the shared Read/Grep free budget and all other gating behavior still works
+correctly; you'll just see two status/error lines per gated call instead of one. This is
+noisy, not broken — an understood tradeoff of running both installs, not a bug.
 
 ## What gets blocked vs. allowed
 
 | Call | Result |
 |---|---|
 | Direct `Bash` / `Write` / `Edit` / `NotebookEdit` at the top level | **Blocked** — always |
-| Direct `Read` or `Grep` at the top level, first call of either tool this session | **Allowed** (one free trivial read, shared by `Read` and `Grep` combined) |
-| Direct `Read` or `Grep` at the top level, any call after that first one this session (across both tools combined) | **Blocked** |
+| Direct `Read` or `Grep` at the top level, within the first `FREE_READ_BUDGET` (3) calls to either tool this session | **Allowed** (a small free budget of trivial reads, shared by `Read` and `Grep` combined) |
+| Direct `Read` or `Grep` at the top level, any call once that combined budget of 3 is exhausted this session | **Blocked** |
 | Direct `Glob` at the top level | **Allowed** — always, by design (cheap, read-only, never gated) |
 | Any call where a subagent (`agent_type`) is already executing | **Allowed** — always exempt |
 | (Standalone variant only) `Write`/`Edit`/`NotebookEdit` to your real `~/.claude/settings.json` or `settings.local.json` | **Allowed** — self-repair escape hatch |
@@ -149,6 +161,60 @@ would be refused if the hook itself failed to run) — that option was deliberat
 chosen here, since it would contradict the fail-open philosophy documented throughout this
 project.
 
+## Why 3, and why Bash/Write/Edit stay fully gated
+
+Two more rounds of live smoke-testing (through Claude Code's real `/plugin` system) measured
+actual subagent delegation overhead for trivial, single-shot tasks — the task notifications
+report tokens, tool uses, and duration for every delegated call:
+
+| Call | Task | Tokens | Tool uses | Duration |
+|---|---|---|---|---|
+| `runner` | "which file changed most recently" | 7,114 | 2 | 9.1s |
+| `builder` | write an 11-byte file | 8,931 | 3 | 9.6s |
+| `scout` | grep top-level files for "TODO" | 15,861 | 5 | 28.3s |
+
+Every delegation carries several thousand tokens of fixed overhead (the subagent's own system
+prompt, tool definitions, reasoning) versus a few hundred tokens for the same trivial work done
+directly. Even granting Haiku's full ~1/20th-of-Opus discount, 15,861 Haiku tokens is roughly
+800 Opus-equivalent tokens against maybe 300 for a direct `Grep`. **For small, single-shot
+tasks, the gate plausibly costs more than it saves.**
+
+**The design decision made in response:** `FREE_READ_BUDGET` (defined in both
+`hooks/gate.py` and `install/token_optimizer_gate.py`) was raised from 1 to 3. Reasoning:
+`Read`/`Grep` are side-effect-free, so the only justification for gating them at all is token
+economics — and the data above shows that economics is negative at a budget of 1 for the
+common case of checking 2-3 related files directly. Raising it to 3 keeps genuine exploration
+batches (4+ reads, where `scout`'s overhead actually amortizes against the work) forced
+through delegation, while letting realistic small lookups stay direct and cheap.
+
+`FREE_READ_BUDGET` is a tunable constant, and 3 is a judgment call based on this data, not a
+precisely-derived optimum. Someone with a different mix of usage — mostly large exploration
+batches, or mostly one-off single-file checks — may reasonably want a different number; change
+the constant in both gate scripts if so.
+
+**`Bash`/`Write`/`Edit`/`NotebookEdit` remain fully gated (no free allowance), deliberately
+unchanged.** Their justification was never purely economic. They have side effects, and the
+plugin's demonstrated, provable benefit — keeping the top-level session's context clean,
+enforcing a deliberate boundary around actions with consequences — holds regardless of whether
+any single instance nets out token-positive. Raising their budget the way `Read`/`Grep`'s was
+raised would trade away that guarantee for the same economics that only justify it for
+read-only calls.
+
+### Two sharp edges observed during live testing
+
+Neither of these is a plugin bug, but both affect real usage and are worth knowing about:
+
+- **`Glob "*"` can recurse into subdirectories** rather than matching only the top level on
+  some setups, which cost `:scout` real tokens in testing — it had to fall back to a
+  `Grep`-based approach instead. `Glob` is deliberately ungated (see above), and `scout` has
+  `Glob` in its tool list, so if `Glob` seems to be matching far more than expected, prefer an
+  explicit `Grep` with a scoped glob pattern.
+- **A top-level session's own tool-routing preferences can leak into a subagent's behavior.**
+  For example, an auto-mode instruction to "prefer Bash for reads" was observed influencing a
+  subagent's choices even though the subagent has its own scoped tool list. Harmless, but worth
+  being aware of — a subagent's declared tools aren't a complete guarantee of its behavior,
+  only of what it's permitted to call.
+
 ## Does this actually save money?
 
 It depends on how you're billed, and the honest answer differs between the two cases.
@@ -178,6 +244,13 @@ a seat plan; verify it in your own account instead:
 
 In short: real and documented for pay-per-token usage, plausible but currently undocumented for
 seat plans. Check the commands above against your own account rather than assuming either way.
+
+Even setting the subscription-billing question aside entirely, the overhead data in
+[Why 3, and why Bash/Write/Edit stay fully gated](#why-3-and-why-bashwriteedit-stay-fully-gated)
+above narrows the claim further: savings, where they exist at all, are concentrated in bulkier
+delegated tasks (reading/searching many files, a substantial scoped implementation), not small
+single-shot ones — which is exactly why the `Read`/`Grep` free budget was raised from 1 to 3
+rather than left forcing every trivial lookup through delegation.
 
 ## Security notes
 
@@ -210,15 +283,32 @@ real issues were found and fixed:
    read back as `0` and immediately rewritten correctly on the next call, rather than
    permanently disabling gating for that session (this was a real bug, now fixed).
 
-The test suite (`python3 tests/test_gate.py`) runs 18 assertions covering both gate variants —
+   **What this does and doesn't guarantee.** The atomic `os.replace()` write guarantees the
+   counter file is *never* corrupted or torn, even if a process is killed mid-write — the live
+   file is only ever swapped in after a full write completes, so a reader always sees either
+   the old value or the new one, never a partial one. It does *not* guarantee an exactly
+   precise count under true simultaneous concurrency: a narrow race could in theory let
+   slightly more than the configured budget through under heavy simultaneous load. This is an
+   accepted, deliberate tradeoff — real file locking (`fcntl.flock`) was the mechanism that was
+   broken on Windows in the first place (this finding), so correctness here was redefined as
+   "never corrupts, always self-heals" rather than "perfectly exact under all concurrency,"
+   which is sufficient for this plugin's purpose (a soft budget nudge toward delegation, not a
+   security boundary).
+
+The test suite (`python3 tests/test_gate.py`) runs 20 assertions covering both gate variants —
 `hooks/gate.py` (plugin) and `install/token_optimizer_gate.py` (standalone) — for every test
 where the distinction matters, plus the core allow/deny behavior and regression coverage for
 all three issues above. Test 9 specifically locks in that the **plugin** variant has no
 self-repair exemption at all (per point 2 above) — only the standalone variant is allowed to
 touch its own `settings.json`. Test 10 locks in the counter self-heal from point 3: a counter
 file corrupted with non-numeric garbage is read back as `0`, allowed, and rewritten correctly,
-then denies the very next call for that session instead of staying permanently stuck open. It
-also runs in GitHub Actions on every push and pull request (`.github/workflows/test.yml`).
+then denies the call once the (now 3-call) free budget for that session is exhausted, instead
+of staying permanently stuck open. Test 11 is a dedicated regression test for the other half of
+point 3 — the "never produces a torn/unparseable file under concurrent writes" guarantee itself
+— firing 10 concurrent gate invocations against one shared session (for each of the two
+variants) and asserting the state file is still parseable as an integer afterward; it
+deliberately does not assert the final count is exact, since that's the tradeoff documented
+above. It also runs in GitHub Actions on every push and pull request (`.github/workflows/test.yml`).
 
 The standalone variant honors `CLAUDE_CONFIG_DIR` (checked before falling back to
 `HOME`/`USERPROFILE` via `os.path.expanduser`) when resolving `~/.claude`, which is also what
