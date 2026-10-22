@@ -1,12 +1,20 @@
 # token-optimizer-plugin
 
-A Claude Code `PreToolUse` hook that hard-blocks direct `Bash`/`Write`/`Edit`/`Read`/`Grep`
+A Claude Code `PreToolUse` hook that hard-blocks direct `Bash`/`Write`/`Edit`/`NotebookEdit`
 calls at the top-level session, forcing mechanical and scoped work to be delegated to cheaper
 subagents (`scout`, `runner`, `builder`) instead of burning the top-level session's selected
 model on it — even if that session has Opus selected. Delegation-by-convention (a CLAUDE.md
 instruction asking nicely) is easy to forget or skip under pressure; this hook makes it
 structurally impossible to bypass for the gated tool calls, short of explicitly turning the
 hook off.
+
+Delegated work runs on each agent's configured model (`scout`/`runner` on Haiku, `builder` on
+Sonnet) rather than whatever model you've selected for the top-level session — see
+[Model selection](#model-selection-caveat) below for the one case where that isn't absolute.
+
+`Read` and `Grep` share a single free direct use per session: whichever one you call first
+uses it up, and both are gated after that (see the table below). `Glob` is deliberately left out of the gate entirely — it's cheap and read-only, so
+this is a decision, not an oversight.
 
 It ships two ways to install it: as a native Claude Code **plugin** (recommended), and as a
 **standalone installer** that merges a hook entry into your own `~/.claude/settings.json` for
@@ -31,6 +39,12 @@ setups without plugin support.
 These are native CLI operations, not gated tool calls, so they always work even while the gate
 is active.
 
+The plugin also ships `agents/scout.md`, `agents/runner.md`, and `agents/builder.md` at the
+repo root — Claude Code auto-discovers a plugin's `agents/` directory by convention, so these
+three subagents are available as soon as the plugin is installed, with no separate step. When
+installed this way they're namespaced: the gate's deny messages (and anyone invoking them
+manually) use `Agent(token-optimizer-plugin:scout)`, not bare `Agent(scout)`.
+
 ### Option B: Standalone install (no plugin support needed)
 
 Clone this repo, then run:
@@ -45,8 +59,24 @@ This will:
 - Safely merge a `PreToolUse` hook entry into `~/.claude/settings.json` (backing up the
   existing file first, and leaving every other key untouched). Running it more than once is
   safe — it detects an existing entry and won't duplicate it.
+- Copy the same `scout.md`, `runner.md`, and `builder.md` agent files to `~/.claude/agents/`
+  as **user-level** agents (not namespaced, unlike the plugin path). This is done
+  **non-destructively**: if a file of the same name already exists there — your own
+  `scout`/`runner`/`builder` agent, say — it is left untouched, and the installer prints a
+  message saying so for each agent it skipped.
 
 This only takes effect in **new** Claude Code sessions.
+
+**Finding a Python interpreter on Windows.** `install.sh` doesn't just check that `python3`,
+`python`, or `py` exist on `PATH` (`command -v`) — it also runs each candidate with a real
+`-c` import check, because a non-functional stub (such as the Windows Store's `python3` alias)
+passes `command -v` but does nothing useful when actually invoked. If none of the three pass
+that check, the installer exits with a clear remediation message: disable the Store alias
+under **Settings > Apps > Advanced app settings > App execution aliases**. The hook entry it
+writes is exec-form (`"command": "<interpreter>"` plus an `"args"` array holding the absolute
+path to the installed gate script), not a shell-form string that depends on expanding `$HOME`
+at hook-run time — which also removes the one configuration where a failing interpreter lookup
+could have blocked the tool call instead of failing open.
 
 **To uninstall:**
 
@@ -56,20 +86,60 @@ bash install/uninstall.sh
 
 This removes the hook entry from `~/.claude/settings.json` (backing it up first) and optionally
 removes the installed gate script and its state directory (it asks for confirmation before
-deleting the state directory, since that data is harmless but you should get to decide).
+deleting the state directory, since that data is harmless but you should get to decide). It also
+removes each of the three agent files from `~/.claude/agents/`, but only if the file is still
+byte-identical to what the repo currently ships — i.e. provably untouched since install. Any
+agent file that looks customized, or that pre-existed before this plugin ever touched it, is
+left alone.
+
+### Installing both ways at once
+
+If you install the plugin **and** run the standalone installer, you'll end up with two
+separate `PreToolUse` hook entries firing on every matched tool call — one from the plugin,
+one from your `~/.claude/settings.json`. Both must independently exit 0 for the call to
+proceed, so the "one free read" budget and all other gating behavior still works correctly;
+you'll just see two status/error lines per gated call instead of one. This is noisy, not
+broken — an understood tradeoff of running both installs, not a bug.
 
 ## What gets blocked vs. allowed
 
 | Call | Result |
 |---|---|
-| Direct `Bash` / `Write` / `Edit` at the top level | **Blocked** — always |
-| Direct `Read` / `Grep` at the top level, 1st time this session | **Allowed** (one free trivial read) |
-| Direct `Read` / `Grep` at the top level, 2nd+ time this session | **Blocked** |
+| Direct `Bash` / `Write` / `Edit` / `NotebookEdit` at the top level | **Blocked** — always |
+| Direct `Read` or `Grep` at the top level, first call of either tool this session | **Allowed** (one free trivial read, shared by `Read` and `Grep` combined) |
+| Direct `Read` or `Grep` at the top level, any call after that first one this session (across both tools combined) | **Blocked** |
+| Direct `Glob` at the top level | **Allowed** — always, by design (cheap, read-only, never gated) |
 | Any call where a subagent (`agent_type`) is already executing | **Allowed** — always exempt |
-| (Standalone variant only) `Write`/`Edit` to your real `~/.claude/settings.json` or `settings.local.json` | **Allowed** — self-repair escape hatch |
+| (Standalone variant only) `Write`/`Edit`/`NotebookEdit` to your real `~/.claude/settings.json` or `settings.local.json` | **Allowed** — self-repair escape hatch |
 
-When a call is blocked, the hook exits non-zero and feeds a message back to the model telling
-it to delegate via `Agent(scout)`, `Agent(runner)`, or `Agent(builder)` instead.
+When a call is blocked, the hook exits non-zero (2) and feeds a message back to the model
+telling it to delegate via `Agent(scout)`, `Agent(runner)`, or `Agent(builder)` instead (or the
+`token-optimizer-plugin:`-namespaced equivalents, for the plugin variant).
+
+### Model selection caveat
+
+Claude Code resolves a subagent's model in this order: a per-invocation model Claude explicitly
+passes, then the subagent's own `model:` frontmatter (`inherit` defers to the parent), then an
+optional `CLAUDE_CODE_SUBAGENT_MODEL` environment variable, then the parent session's model.
+`scout`/`runner` (`model: haiku`) and `builder` (`model: sonnet`) sit ahead of the parent
+session's model in that order, so delegated work normally runs on the cheaper model regardless
+of what the top-level session has selected. It's not an absolute lock, though: the docs don't
+rule out Claude passing a different per-invocation model override on a given call, which would
+take priority over the frontmatter. Treat the value proposition as "delegated work runs on each
+agent's configured model rather than whatever you've selected for the top-level session," not
+as an unconditional guarantee.
+
+### `onFailure` is deliberately fail-open
+
+The hook entries in both `hooks/hooks.json` and the one `install.sh` merges into
+`settings.json` are left at Claude Code's default (non-blocking) `onFailure` behavior: if the
+configured interpreter crashes or can't be found at hook-invocation time, the tool call
+proceeds without being gated, rather than getting stuck waiting on a hook that will never
+succeed. This is a deliberate design choice, not an oversight. Current Claude Code versions
+support `onFailure: "block"`, which would turn this into a true hard-fail gate (the tool call
+would be refused if the hook itself failed to run) — that option was deliberately **not**
+chosen here, since it would contradict the fail-open philosophy documented throughout this
+project.
 
 ## Security notes
 
@@ -87,28 +157,44 @@ real issues were found and fixed:
    `settings.json`), which would also exempt an attacker-chosen path like
    `/tmp/fake_settings.json`. **Fixed** by resolving the real path (`os.path.realpath`) of both
    the incoming `file_path` and the real `~/.claude/settings.json` / `settings.local.json`, and
-   comparing those resolved paths exactly.
+   comparing those resolved paths exactly. Note that only the standalone variant gets this
+   carve-out at all — the plugin variant never reads or writes the user's personal
+   `~/.claude/settings.json`, so it has no self-repair exemption and denies writes to that path
+   like any other `Write`/`Edit` (locked in by test 9, see below).
 
 3. **Race condition under concurrent calls.** Two tool calls racing to read-increment-write the
-   same per-session counter file could step on each other and under-count. **Fixed** with
-   `fcntl.flock`-based exclusive locking around the read-modify-write.
+   same per-session counter file could previously step on each other and under-count. This used
+   to be handled with `fcntl.flock`-based exclusive locking, which has been **removed
+   entirely** in favor of an atomic check-then-increment built on `os.replace()`: the new count
+   is written to a temp file and atomically swapped into place, so there's no read-modify-write
+   window left to race, and no locking is needed on either POSIX or Windows. The counter also
+   self-heals: if its state file is ever corrupted (e.g. truncated by a crash mid-write), it's
+   read back as `0` and immediately rewritten correctly on the next call, rather than
+   permanently disabling gating for that session (this was a real bug, now fixed).
 
-The test suite (`python3 tests/test_gate.py`) codifies regression coverage for all three of
-these, plus the core allow/deny behavior, as automated, repeatable, CI-friendly checks. It also
-runs in GitHub Actions on every push and pull request (`.github/workflows/test.yml`).
+The test suite (`python3 tests/test_gate.py`) runs 16 assertions covering both gate variants —
+`hooks/gate.py` (plugin) and `install/token_optimizer_gate.py` (standalone) — for every test
+where the distinction matters, plus the core allow/deny behavior and regression coverage for
+all three issues above. Test 9 specifically locks in that the **plugin** variant has no
+self-repair exemption at all (per point 2 above) — only the standalone variant is allowed to
+touch its own `settings.json`. It also runs in GitHub Actions on every push and pull request
+(`.github/workflows/test.yml`).
+
+The standalone variant honors `CLAUDE_CONFIG_DIR` (checked before falling back to
+`HOME`/`USERPROFILE` via `os.path.expanduser`) when resolving `~/.claude`, which is also what
+makes the test suite reliably cross-platform — tests can point the gate at an isolated temp
+directory without touching the real `~/.claude`.
 
 ## Known limitations
 
 - **Requires `python3` on `PATH`.** If it's missing, the installer refuses to run with a clear
   error; if it's missing at hook-invocation time, the hook's own fail-open design covers it
-  (worst case the gate simply doesn't run).
-- **File locking is POSIX-only (`fcntl`).** On native Windows, `fcntl` isn't available, so the
-  race-condition protection silently degrades (no crash — the lock is just skipped). This is a
-  known, documented gap, not a regression; WSL and macOS/Linux are unaffected.
-- **The plugin variant's use of `${CLAUDE_PLUGIN_DATA}` for state has NOT yet been empirically
-  verified against a real `/plugin install` flow.** The logic assumes Claude Code populates
-  this environment variable with a writable, per-plugin data directory at hook invocation time.
-  **Please smoke-test this before relying on it in production** — this is a TODO / please-verify
-  item, not a confirmed-working claim. If `${CLAUDE_PLUGIN_DATA}` is unset or still a literal
-  `${...}` placeholder at runtime, the gate falls back to a directory under the system temp dir,
-  which is functional but not ideal (it won't be namespaced per-plugin-install the same way).
+  (worst case the gate simply doesn't run — see `onFailure` above).
+- **The plugin variant's state directory.** `${CLAUDE_PLUGIN_DATA}` is documented, confirmed
+  Claude Code behavior: it resolves to `~/.claude/plugins/data/<plugin-id>/`, is substituted
+  correctly inside a hook's `args` array (exactly how `hooks/hooks.json` uses it), and is also
+  exported as a real environment variable to the hook process. If it's ever unresolved at
+  runtime (still a literal `${...}` placeholder, or unset), the gate falls back to
+  `~/.claude/token-optimizer-plugin-state` with `0700` permissions — a private, per-user
+  directory rather than shared `/tmp` — so the fallback stays safe even though it isn't
+  namespaced per-plugin-install the same way.
