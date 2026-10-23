@@ -56,6 +56,17 @@ This project ships two independent ways to get this behavior, and they're not th
   [When to use this — and when not to](#when-to-use-this--and-when-not-to) and still want the
   hard version.
 
+**Neither is the "full" version of the other — they trade off differently, and the measured
+economics point toward the skill as the better default for most workloads.** The plugin routes
+by hard block; the skill routes by persuasion. [Why 3, and why Bash/Write/Edit stay fully
+gated](#why-3-and-why-bashwriteedit-stay-fully-gated) below measured real delegation overhead —
+7,114–15,861 tokens and 9.1–28.3s per trivial call — and that cost is paid on *every* gated call
+under the plugin, whether or not delegating actually pays off for that specific call. The skill
+only pays it when Claude's own judgment says delegating is worth it. Reserve the plugin for
+long, research-heavy sessions where context is genuinely the scarce resource and the structural
+guarantee — delegation can't be skipped under pressure — is worth paying for regardless of any
+single call's economics; use the skill for everything else.
+
 Everything from here down in this README is about the plugin/hook packaging.
 
 ## When to use this — and when not to
