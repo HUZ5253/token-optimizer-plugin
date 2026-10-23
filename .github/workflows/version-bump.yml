@@ -1,0 +1,78 @@
+name: Version bump guard
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  check-version-bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine base and head refs
+        id: refs
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            BEFORE="${{ github.event.before }}"
+            if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "base=$BEFORE" >> "$GITHUB_OUTPUT"
+              echo "head=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Check plugin.json version bump when components changed
+        if: steps.refs.outputs.skip != 'true'
+        env:
+          BASE_SHA: ${{ steps.refs.outputs.base }}
+          HEAD_SHA: ${{ steps.refs.outputs.head }}
+        run: |
+          set -e
+
+          CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          COMPONENT_CHANGED=false
+          while IFS= read -r f; do
+            case "$f" in
+              skills/*|agents/*|hooks/*|commands/*)
+                COMPONENT_CHANGED=true
+                ;;
+            esac
+          done <<< "$CHANGED_FILES"
+
+          if [ "$COMPONENT_CHANGED" != "true" ]; then
+            echo "No files under skills/, agents/, hooks/, or commands/ changed. Nothing to check."
+            exit 0
+          fi
+
+          if ! echo "$CHANGED_FILES" | grep -qx '\.claude-plugin/plugin\.json'; then
+            echo "::error::A component under skills/, agents/, hooks/, or commands/ changed, but .claude-plugin/plugin.json was not touched. Claude Code caches an installed plugin by its version string, so a change that doesn't bump the version will never reach anyone who already installed it. Bump the version in .claude-plugin/plugin.json (see CONTRIBUTING.md) and push again."
+            exit 1
+          fi
+
+          BASE_VERSION=$(git show "$BASE_SHA:.claude-plugin/plugin.json" 2>/dev/null | python3 -c "import json, sys; data = sys.stdin.read(); print(json.loads(data).get('version', '') if data.strip() else '')" || echo "")
+          HEAD_VERSION=$(python3 -c "import json; print(json.load(open('.claude-plugin/plugin.json')).get('version', ''))")
+
+          echo "Base version: '$BASE_VERSION'"
+          echo "Head version: '$HEAD_VERSION'"
+
+          if [ "$BASE_VERSION" = "$HEAD_VERSION" ]; then
+            echo "::error::A component under skills/, agents/, hooks/, or commands/ changed and .claude-plugin/plugin.json was touched, but its version field ('$HEAD_VERSION') did not actually change. Claude Code caches an installed plugin by its version string, so an unchanged version means this change reaches no existing install. Bump the version field (see CONTRIBUTING.md) and push again."
+            exit 1
+          fi
+
+          echo "Version bump confirmed ($BASE_VERSION -> $HEAD_VERSION). Check passed."

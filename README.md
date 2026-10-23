@@ -141,6 +141,13 @@ blocking the very next matched tool call in the already-running session regardle
 actually stops gating starting in your **next** session. If you need the gate off right now,
 either use `/plugin uninstall`, or run `/plugin disable` and then restart the current session.
 
+**If you installed before version 1.1.0, uninstall and reinstall — don't rely on `/plugin
+update`.** Claude Code caches a plugin by its version string, and this plugin stayed at
+`1.0.0` through its first several releases. A cached `1.0.0` install may not pick up later
+changes (including the `skills/token-optimizer` skill added afterward) even after you run
+`/plugin update`. Run `/plugin uninstall token-optimizer-plugin` followed by the install
+commands above to get a clean, current copy.
+
 The plugin also ships `agents/scout.md`, `agents/runner.md`, and `agents/builder.md` at the
 repo root — Claude Code auto-discovers a plugin's `agents/` directory by convention, so these
 three subagents are available as soon as the plugin is installed, with no separate step. When
