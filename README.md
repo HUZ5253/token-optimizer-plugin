@@ -465,3 +465,10 @@ directory without touching the real `~/.claude`.
   `~/.claude/token-optimizer-plugin-state` with `0700` permissions — a private, per-user
   directory rather than shared `/tmp` — so the fallback stays safe even though it isn't
   namespaced per-plugin-install the same way.
+
+## Third-party code
+
+This project is MIT-licensed (see [LICENSE](LICENSE)). `skills/token-optimizer/scripts/token-audit.py`
+is adapted from [`bryanvine/token-saver`](https://github.com/bryanvine/token-saver)
+(also MIT) — the original copyright and permission notice is reproduced in that file's
+header and in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

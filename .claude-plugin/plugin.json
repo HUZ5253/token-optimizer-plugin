@@ -1,6 +1,6 @@
 {
   "name": "token-optimizer-plugin",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Hard-blocks mechanical Bash/Write/Edit/Read/Grep calls at the top-level Claude Code session, forcing delegation to cheaper subagents for token and cost optimization.",
   "author": {
     "name": "Huzaifa Jamnagarwala",
